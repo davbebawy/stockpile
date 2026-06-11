@@ -1,0 +1,171 @@
+add_product:
+  name: Add product
+  description: Create a catalog product (a reusable definition; not a physical item).
+  fields:
+    name:
+      required: true
+      example: Ground Beef
+      selector:
+        text:
+    brand:
+      example: Costco
+      selector:
+        text:
+    unit:
+      example: lb
+      selector:
+        text:
+    category:
+      example: Meat
+      selector:
+        text:
+    image:
+      description: Path served by HA, e.g. /local/stockpile/beef.jpg
+      selector:
+        text:
+    aliases:
+      selector:
+        object:
+    threshold:
+      description: Low-stock threshold in whole-package equivalents.
+      selector:
+        number:
+          min: 0
+          step: 0.5
+          mode: box
+
+add_package:
+  name: Add package
+  description: Add a physical package. Reference an existing product_id, or pass name/brand to find-or-create one.
+  fields:
+    product_id:
+      example: prod_1a2b3c4d
+      selector:
+        text:
+    name:
+      example: Ground Beef
+      selector:
+        text:
+    brand:
+      example: Costco
+      selector:
+        text:
+    remaining:
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    quantity:
+      default: 1
+      selector:
+        number:
+          min: 0
+          step: 0.1
+          mode: box
+    location_id:
+      selector:
+        text:
+    frozen:
+      selector:
+        date:
+    expires:
+      selector:
+        date:
+    notes:
+      selector:
+        text:
+
+consume:
+  name: Consume
+  description: Reduce a package's remaining percentage and log the event.
+  fields:
+    package_id:
+      required: true
+      selector:
+        text:
+    amount:
+      required: true
+      description: Percent to consume (10, 25, 50, 100...).
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    who:
+      selector:
+        text:
+
+set_remaining:
+  name: Set remaining
+  description: Set a package's remaining percentage to an absolute value.
+  fields:
+    package_id:
+      required: true
+      selector:
+        text:
+    remaining:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    who:
+      selector:
+        text:
+
+remove_package:
+  name: Remove package
+  fields:
+    package_id:
+      required: true
+      selector:
+        text:
+
+remove_product:
+  name: Remove product
+  description: Deletes the product and all its packages.
+  fields:
+    product_id:
+      required: true
+      selector:
+        text:
+
+add_location:
+  name: Add location
+  fields:
+    name:
+      required: true
+      example: Freezer Bottom Basket
+      selector:
+        text:
+    parent:
+      selector:
+        text:
+
+get_summary:
+  name: Get summary
+  description: Returns aggregated per-product inventory (package counts and remaining). Returns response data.
+
+list_packages:
+  name: List packages
+  description: Returns all packages, optionally filtered by location. Returns response data.
+  fields:
+    location_id:
+      selector:
+        text:
+
+reorder:
+  name: Reorder packages
+  description: Set the manual display order. Pass package ids in the desired order.
+  fields:
+    package_ids:
+      required: true
+      selector:
+        object:
+
+seed_demo:
+  name: Load demo data
+  description: Populate realistic test data across Freezer/Pantry/Garage. Skips if already seeded.

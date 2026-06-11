@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Stockpile",
+        "description": "Set up Stockpile. A SQLite database will be created at config/stockpile.db."
+      }
+    },
+    "abort": {
+      "already_configured": "Stockpile is already set up."
+    }
+  }
+}
