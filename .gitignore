@@ -5,3 +5,6 @@ __pycache__/
 *.db-shm
 .DS_Store
 .venv/
+.venv-test/
+.pytest_cache/
+.coverage

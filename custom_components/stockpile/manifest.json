@@ -1,13 +1,15 @@
 {
   "domain": "stockpile",
   "name": "Stockpile",
-  "version": "0.2.0",
-  "documentation": "https://github.com/yourname/stockpile",
-  "issue_tracker": "https://github.com/yourname/stockpile/issues",
-  "codeowners": [],
-  "dependencies": ["http", "frontend"],
-  "requirements": ["aiosqlite>=0.19.0"],
+  "version": "0.5.0",
+  "documentation": "https://github.com/davbebawwy/stockpile",
+  "issue_tracker": "https://github.com/davbebawwy/stockpile/issues",
+  "codeowners": ["@davbebawwy"],
+  "dependencies": ["http", "frontend", "websocket_api"],
+  "requirements": ["aiosqlite>=0.20.0"],
   "config_flow": true,
   "integration_type": "service",
-  "iot_class": "local_push"
+  "iot_class": "local_push",
+  "quality_scale": "silver",
+  "loggers": ["custom_components.stockpile"]
 }

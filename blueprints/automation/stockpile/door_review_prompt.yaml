@@ -1,0 +1,81 @@
+blueprint:
+  name: Stockpile — Review after door opens
+  description: >
+    When a freezer / pantry / cabinet door has been open for a few seconds,
+    send a Stockpile review prompt (low stock + expiring soon) to a chosen
+    notification target. Useful for nudging the person standing at the
+    fridge to update inventory or grab the oldest package first.
+  domain: automation
+  source_url: https://github.com/davbebawwy/stockpile/blob/main/blueprints/automation/stockpile/door_review_prompt.yaml
+  input:
+    door_sensor:
+      name: Door / cabinet sensor
+      description: A binary_sensor that turns on when the door opens.
+      selector:
+        entity:
+          domain: binary_sensor
+    open_for_seconds:
+      name: Trigger after open for (seconds)
+      description: Avoid spamming on quick peeks.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 600
+          unit_of_measurement: s
+          mode: box
+    notify_target:
+      name: Notify service
+      description: The notify service to call (e.g. notify.mobile_app_pixel).
+      selector:
+        text:
+    kind:
+      name: Kind
+      description: Which kind of items to surface in the prompt.
+      default: all
+      selector:
+        select:
+          options:
+            - all
+            - low
+            - expiring
+    quiet_hours_start:
+      name: Quiet hours start
+      default: "22:00:00"
+      selector:
+        time:
+    quiet_hours_end:
+      name: Quiet hours end
+      default: "07:00:00"
+      selector:
+        time:
+
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: state
+    entity_id: !input door_sensor
+    to: "on"
+    for:
+      seconds: !input open_for_seconds
+
+condition:
+  # Suppress overnight; HA's `time` condition handles ranges that wrap midnight.
+  - condition: time
+    after: !input quiet_hours_end
+    before: !input quiet_hours_start
+
+action:
+  - service: stockpile.compose_notification
+    data:
+      kind: !input kind
+    response_variable: stockpile_summary
+  - if:
+      - condition: template
+        value_template: "{{ (stockpile_summary.low_count | int(0)) + (stockpile_summary.expiring_count | int(0)) > 0 }}"
+    then:
+      - service: !input notify_target
+        data:
+          title: "{{ stockpile_summary.title }}"
+          message: "{{ stockpile_summary.message }}"

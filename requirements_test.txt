@@ -1,0 +1,4 @@
+aiosqlite>=0.20.0
+homeassistant>=2025.6.0
+pytest>=8.0
+pytest-asyncio>=0.23

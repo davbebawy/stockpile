@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import timedelta as _timedelta
 from typing import Any
 
 import aiosqlite
 
 from homeassistant.util import dt as dt_util
+
+from .const import EXPIRING_SOON_DAYS
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS locations (
@@ -57,9 +60,16 @@ CREATE TABLE IF NOT EXISTS consumption_log (
     ts               TEXT
 );
 
+CREATE TABLE IF NOT EXISTS product_state (
+    product_id      TEXT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    snoozed_until   TEXT,
+    acknowledged_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_packages_product  ON packages(product_id);
 CREATE INDEX IF NOT EXISTS idx_packages_location ON packages(location_id);
 CREATE INDEX IF NOT EXISTS idx_log_product       ON consumption_log(product_id);
+CREATE INDEX IF NOT EXISTS idx_log_ts            ON consumption_log(ts);
 """
 
 
@@ -189,17 +199,37 @@ class InventoryDB:
         return row
 
     async def find_product(self, name: str, brand: str | None = None) -> dict[str, Any] | None:
+        """Resolve a product by name (or one of its aliases), optionally scoped to a brand.
+
+        Exact name match wins. Otherwise an alias match wins. Comparison is
+        case-insensitive and tolerant of leading/trailing whitespace.
+        """
+        needle = (name or "").strip().lower()
+        if not needle:
+            return None
+
         if brand:
             row = await self._query_one(
-                "SELECT * FROM products WHERE lower(name)=lower(?) AND lower(coalesce(brand,''))=lower(?)",
-                (name, brand),
+                "SELECT * FROM products WHERE lower(trim(name))=? AND lower(coalesce(brand,''))=lower(?)",
+                (needle, brand),
             )
         else:
             row = await self._query_one(
-                "SELECT * FROM products WHERE lower(name)=lower(?)", (name,)
+                "SELECT * FROM products WHERE lower(trim(name))=?", (needle,)
             )
-        if row:
-            row["aliases"] = json.loads(row["aliases"] or "[]")
+
+        if not row:
+            # Fall back to alias search. SQLite JSON1 is widely available,
+            # but be defensive — load all products and scan their alias lists.
+            for candidate in await self.get_products():
+                if brand and (candidate.get("brand") or "").strip().lower() != brand.strip().lower():
+                    continue
+                aliases = [a.strip().lower() for a in (candidate.get("aliases") or [])]
+                if needle in aliases:
+                    return candidate
+            return None
+
+        row["aliases"] = json.loads(row["aliases"] or "[]")
         return row
 
     async def remove_product(self, product_id: str) -> None:
@@ -248,8 +278,14 @@ class InventoryDB:
             params = (location_id,)
         sql += " ORDER BY pk.position IS NULL, pk.position, pr.name, pk.added"
         rows = await self._query(sql, params)
+        now = dt_util.utcnow()
         for r in rows:
             r["status"] = _status(r["remaining"])
+            r["expires_in_days"] = _days_until(r.get("expires"), now)
+            r["expiring_soon"] = (
+                r["expires_in_days"] is not None and 0 <= r["expires_in_days"] <= EXPIRING_SOON_DAYS
+            )
+            r["expired"] = r["expires_in_days"] is not None and r["expires_in_days"] < 0
         return rows
 
     async def get_package(self, package_id: str) -> dict[str, Any] | None:
@@ -333,24 +369,225 @@ class InventoryDB:
                 pr.image, pr.category, pr.threshold,
                 COUNT(pk.id) AS package_count,
                 COALESCE(SUM(pk.remaining), 0) / 100.0 AS equiv_remaining,
-                COALESCE(SUM(pk.quantity * pk.remaining / 100.0), 0) AS qty_remaining
+                COALESCE(SUM(pk.quantity * pk.remaining / 100.0), 0) AS qty_remaining,
+                ps.snoozed_until, ps.acknowledged_at
             FROM products pr
             LEFT JOIN packages pk ON pk.product_id = pr.id
+            LEFT JOIN product_state ps ON ps.product_id = pr.id
             GROUP BY pr.id
             ORDER BY pr.name
             """
         )
+        now = dt_util.utcnow()
         for r in rows:
             thr = r.get("threshold")
             r["low_stock"] = thr is not None and r["equiv_remaining"] < thr
+            r["snoozed"] = _is_future(r.get("snoozed_until"), now)
         return rows
 
-    async def get_low_stock(self) -> list[dict[str, Any]]:
-        return [r for r in await self.get_summary() if r["low_stock"]]
+    async def get_low_stock(self, *, include_snoozed: bool = False) -> list[dict[str, Any]]:
+        return [
+            r for r in await self.get_summary()
+            if r["low_stock"] and (include_snoozed or not r["snoozed"])
+        ]
+
+    async def get_expiring_soon(self, *, include_snoozed: bool = False) -> list[dict[str, Any]]:
+        """Packages with an expiration date within EXPIRING_SOON_DAYS (or already past).
+
+        Honors per-product snooze unless `include_snoozed` is set.
+        """
+        snoozed_ids: set[str] = set()
+        if not include_snoozed:
+            now = dt_util.utcnow()
+            for r in await self._query("SELECT product_id, snoozed_until FROM product_state"):
+                if _is_future(r.get("snoozed_until"), now):
+                    snoozed_ids.add(r["product_id"])
+
+        return [
+            p for p in await self.get_packages()
+            if (p.get("expiring_soon") or p.get("expired"))
+            and (p["product_id"] not in snoozed_ids)
+        ]
+
+    # ------------------------------------------------------------------ #
+    # snooze / acknowledge
+    # ------------------------------------------------------------------ #
+    async def snooze_product(self, product_id: str, until_iso: str) -> None:
+        await self._write(
+            """INSERT INTO product_state (product_id, snoozed_until)
+               VALUES (?, ?)
+               ON CONFLICT(product_id) DO UPDATE SET snoozed_until = excluded.snoozed_until""",
+            (product_id, until_iso),
+        )
+
+    async def acknowledge_product(self, product_id: str) -> None:
+        await self._write(
+            """INSERT INTO product_state (product_id, acknowledged_at, snoozed_until)
+               VALUES (?, ?, NULL)
+               ON CONFLICT(product_id) DO UPDATE
+               SET acknowledged_at = excluded.acknowledged_at,
+                   snoozed_until = NULL""",
+            (product_id, _now()),
+        )
+
+    async def clear_snooze(self, product_id: str) -> None:
+        await self._write(
+            "UPDATE product_state SET snoozed_until = NULL WHERE product_id = ?",
+            (product_id,),
+        )
+
+    # ------------------------------------------------------------------ #
+    # velocity
+    # ------------------------------------------------------------------ #
+    async def get_velocity(self, product_id: str, days: int = 30) -> dict[str, Any]:
+        """Average consumption velocity for a product over the last `days`.
+
+        Returns equivalent packages consumed per day. "Equivalent package" is
+        the sum of `amount` percentages divided by 100.
+        """
+        days = max(1, int(days))
+        cutoff = (dt_util.utcnow() - _timedelta(days=days)).isoformat()
+        rows = await self._query(
+            """SELECT COUNT(*) AS events, COALESCE(SUM(amount), 0) AS total_amount
+               FROM consumption_log
+               WHERE product_id = ? AND ts >= ?""",
+            (product_id, cutoff),
+        )
+        if not rows:
+            return {"events": 0, "consumed_equiv": 0.0, "per_day": 0.0, "days": days}
+        row = rows[0]
+        equiv = float(row["total_amount"] or 0) / 100.0
+        return {
+            "events": int(row["events"]),
+            "consumed_equiv": round(equiv, 3),
+            "per_day": round(equiv / days, 4),
+            "days": days,
+        }
+
+    async def get_all_velocities(self, days: int = 30) -> list[dict[str, Any]]:
+        days = max(1, int(days))
+        cutoff = (dt_util.utcnow() - _timedelta(days=days)).isoformat()
+        rows = await self._query(
+            """SELECT product_id,
+                      COUNT(*) AS events,
+                      COALESCE(SUM(amount), 0) AS total_amount
+               FROM consumption_log
+               WHERE ts >= ?
+               GROUP BY product_id""",
+            (cutoff,),
+        )
+        return [
+            {
+                "product_id": r["product_id"],
+                "events": int(r["events"]),
+                "consumed_equiv": round(float(r["total_amount"] or 0) / 100.0, 3),
+                "per_day": round(float(r["total_amount"] or 0) / 100.0 / days, 4),
+                "days": days,
+            }
+            for r in rows
+        ]
 
     async def count_packages(self) -> int:
         row = await self._query_one("SELECT COUNT(*) AS c FROM packages")
         return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------ #
+    # export / import (JSON backup)
+    # ------------------------------------------------------------------ #
+    async def export_all(self) -> dict[str, Any]:
+        """Dump the full DB as a JSON-serializable dict."""
+        locations = await self._query("SELECT * FROM locations")
+        products = [
+            {**p, "aliases": json.loads(p["aliases"] or "[]")}
+            for p in await self._query("SELECT * FROM products")
+        ]
+        packages = await self._query(
+            "SELECT id, product_id, remaining, quantity, location_id, position, "
+            "added, frozen, expires, notes FROM packages"
+        )
+        log = await self._query("SELECT * FROM consumption_log")
+        return {
+            "version": 1,
+            "exported_at": _now(),
+            "locations": locations,
+            "products": products,
+            "packages": packages,
+            "consumption_log": log,
+        }
+
+    async def import_all(self, payload: dict[str, Any], *, replace: bool = False) -> dict[str, int]:
+        """Restore from an `export_all` payload.
+
+        With `replace=True`, the existing tables are cleared first. Otherwise
+        rows are upserted by primary key.
+        """
+        assert self._db is not None
+        if payload.get("version") != 1:
+            raise ValueError(f"unsupported export version: {payload.get('version')}")
+
+        async with self._write_lock:
+            if replace:
+                for tbl in ("consumption_log", "packages", "products", "locations"):
+                    await self._db.execute(f"DELETE FROM {tbl}")
+
+            counts = {"locations": 0, "products": 0, "packages": 0, "log": 0}
+
+            for loc in payload.get("locations", []):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO locations (id, name, parent) VALUES (?, ?, ?)",
+                    (loc["id"], loc["name"], loc.get("parent")),
+                )
+                counts["locations"] += 1
+
+            for pr in payload.get("products", []):
+                aliases = pr.get("aliases") or []
+                if isinstance(aliases, str):
+                    try:
+                        aliases = json.loads(aliases)
+                    except ValueError:
+                        aliases = []
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO products "
+                    "(id, name, brand, unit, category, image, aliases, threshold, created) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        pr["id"], pr["name"], pr.get("brand"), pr.get("unit"),
+                        pr.get("category"), pr.get("image"),
+                        json.dumps(aliases), pr.get("threshold"),
+                        pr.get("created") or _now(),
+                    ),
+                )
+                counts["products"] += 1
+
+            for pk in payload.get("packages", []):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO packages "
+                    "(id, product_id, remaining, quantity, location_id, position, added, frozen, expires, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        pk["id"], pk["product_id"], pk.get("remaining", 100.0),
+                        pk.get("quantity", 1.0), pk.get("location_id"),
+                        pk.get("position"), pk.get("added") or _now(),
+                        pk.get("frozen"), pk.get("expires"), pk.get("notes"),
+                    ),
+                )
+                counts["packages"] += 1
+
+            for ev in payload.get("consumption_log", []):
+                await self._db.execute(
+                    "INSERT INTO consumption_log "
+                    "(package_id, product_id, amount, remaining_after, who, ts) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        ev.get("package_id"), ev.get("product_id"),
+                        ev.get("amount"), ev.get("remaining_after"),
+                        ev.get("who"), ev.get("ts") or _now(),
+                    ),
+                )
+                counts["log"] += 1
+
+            await self._db.commit()
+            return counts
 
     # ------------------------------------------------------------------ #
     # demo / test data
@@ -400,3 +637,27 @@ def _status(remaining: float) -> str:
     if remaining < 75:
         return "medium"
     return "full"
+
+
+def _is_future(iso: str | None, now) -> bool:
+    if not iso:
+        return False
+    try:
+        target = dt_util.parse_datetime(iso) or dt_util.parse_datetime(f"{iso}T00:00:00+00:00")
+        return target is not None and target > now
+    except (TypeError, ValueError):
+        return False
+
+
+def _days_until(iso: str | None, now) -> int | None:
+    """Days from `now` until the given ISO date. Negative if past. None if absent."""
+    if not iso:
+        return None
+    try:
+        target = dt_util.parse_datetime(iso) or dt_util.parse_datetime(f"{iso}T00:00:00+00:00")
+        if target is None:
+            return None
+        delta = target - now
+        return int(delta.total_seconds() // 86400)
+    except (TypeError, ValueError):
+        return None

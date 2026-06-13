@@ -3,11 +3,24 @@
     "step": {
       "user": {
         "title": "Stockpile",
-        "description": "Set up Stockpile. A SQLite database will be created at config/stockpile.db."
+        "description": "Set up Stockpile. A SQLite database will be created at config/stockpile.db. Two Lovelace cards register themselves automatically."
       }
     },
     "abort": {
       "already_configured": "Stockpile is already set up."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "stockpile_total_packages": {
+        "name": "Total packages"
+      },
+      "stockpile_low_stock": {
+        "name": "Low stock"
+      },
+      "stockpile_expiring_soon": {
+        "name": "Expiring soon"
+      }
     }
   }
 }

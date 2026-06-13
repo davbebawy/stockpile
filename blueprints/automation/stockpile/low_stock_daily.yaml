@@ -1,0 +1,48 @@
+blueprint:
+  name: Stockpile — Daily low-stock and expiring summary
+  description: >
+    Once a day at a chosen time, send a notification listing items that are
+    low on stock and packages that will expire soon. If everything is fine,
+    nothing is sent (no daily noise).
+  domain: automation
+  source_url: https://github.com/davbebawwy/stockpile/blob/main/blueprints/automation/stockpile/low_stock_daily.yaml
+  input:
+    notify_target:
+      name: Notify service
+      description: The notify service to call (e.g. notify.mobile_app_pixel).
+      selector:
+        text:
+    run_at:
+      name: Time of day
+      default: "08:00:00"
+      selector:
+        time:
+    kind:
+      name: Kind
+      default: all
+      selector:
+        select:
+          options:
+            - all
+            - low
+            - expiring
+
+mode: single
+
+trigger:
+  - platform: time
+    at: !input run_at
+
+action:
+  - service: stockpile.compose_notification
+    data:
+      kind: !input kind
+    response_variable: stockpile_summary
+  - if:
+      - condition: template
+        value_template: "{{ (stockpile_summary.low_count | int(0)) + (stockpile_summary.expiring_count | int(0)) > 0 }}"
+    then:
+      - service: !input notify_target
+        data:
+          title: "{{ stockpile_summary.title }}"
+          message: "{{ stockpile_summary.message }}"

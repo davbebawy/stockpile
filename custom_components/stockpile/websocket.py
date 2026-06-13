@@ -58,6 +58,19 @@ async def ws_history(hass, connection, msg):
     connection.send_result(msg["id"], {"history": history})
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "stockpile/velocity",
+        vol.Required("product_id"): str,
+        vol.Optional("days", default=30): int,
+    }
+)
+@websocket_api.async_response
+async def ws_velocity(hass, connection, msg):
+    velocity = await _db(hass).get_velocity(msg["product_id"], msg["days"])
+    connection.send_result(msg["id"], {"velocity": velocity})
+
+
 @websocket_api.websocket_command({vol.Required("type"): "stockpile/subscribe"})
 @callback
 def ws_subscribe(hass, connection, msg):
@@ -80,4 +93,5 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_summary)
     websocket_api.async_register_command(hass, ws_locations)
     websocket_api.async_register_command(hass, ws_history)
+    websocket_api.async_register_command(hass, ws_velocity)
     websocket_api.async_register_command(hass, ws_subscribe)

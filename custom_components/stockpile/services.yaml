@@ -169,3 +169,97 @@ reorder:
 seed_demo:
   name: Load demo data
   description: Populate realistic test data across Freezer/Pantry/Garage. Skips if already seeded.
+
+export:
+  name: Export
+  description: Return the full Stockpile dataset as a JSON-serializable object (use response_variable to capture it).
+
+import_data:
+  name: Import
+  description: Restore from an `export` payload. Use replace=true to wipe existing data first; otherwise rows are upserted by id.
+  fields:
+    data:
+      required: true
+      description: Object previously produced by stockpile.export.
+      selector:
+        object:
+    replace:
+      default: false
+      selector:
+        boolean:
+
+compose_notification:
+  name: Compose notification
+  description: Build a short text summary of low-stock and expiring-soon items suitable for notifications. Returns title/message and counts.
+  fields:
+    kind:
+      default: all
+      selector:
+        select:
+          options:
+            - all
+            - low
+            - expiring
+    limit:
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          mode: box
+
+snooze:
+  name: Snooze product alerts
+  description: Suppress low-stock and expiring alerts for one product. Provide hours, days, or an explicit until timestamp.
+  fields:
+    product_id:
+      required: true
+      selector:
+        text:
+    hours:
+      selector:
+        number:
+          min: 0
+          step: 1
+          mode: box
+    days:
+      selector:
+        number:
+          min: 0
+          step: 1
+          mode: box
+    until:
+      description: ISO 8601 timestamp. Mutually exclusive with hours and days.
+      selector:
+        text:
+
+acknowledge:
+  name: Acknowledge product
+  description: Mark a product as reviewed (clears any active snooze and records the timestamp).
+  fields:
+    product_id:
+      required: true
+      selector:
+        text:
+
+push_to_todo:
+  name: Push to a todo list
+  description: Add low-stock or expiring items to a Home Assistant todo list entity. Dedupes against existing items by default.
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+    kind:
+      default: low
+      selector:
+        select:
+          options:
+            - low
+            - expiring
+            - all
+    dedupe:
+      default: true
+      selector:
+        boolean:

@@ -1,9 +1,12 @@
 """Constants for the Stockpile integration."""
 
 DOMAIN = "stockpile"
-VERSION = "0.2.0"
+VERSION = "0.5.0"
 
 DB_FILENAME = "stockpile.db"
+
+# Threshold (in days) below which a package is treated as "expiring soon".
+EXPIRING_SOON_DAYS = 7
 
 # Fired on the HA event bus whenever inventory data changes.
 # Automations and the frontend card can listen for this.
