@@ -131,6 +131,7 @@ show_expiring: true         # optional: surface expiring/expired items
 | `stockpile.snooze` | Suppress alerts for one product (`hours`, `days`, or `until`). |
 | `stockpile.acknowledge` | Mark a product as reviewed; clears any active snooze. |
 | `stockpile.push_to_todo` | Add low-stock / expiring items to a Home Assistant `todo` entity. |
+| `stockpile.suggest_restock` | Velocity-based reorder suggestions with quantities. |
 
 ## WebSocket API
 
@@ -178,8 +179,10 @@ Two ready-made automation blueprints live in
 - **`low_stock_daily.yaml`** — once a day at a chosen time, send a summary of
   low-stock and expiring items. Sends nothing when inventory is healthy.
 
-Both rely on `stockpile.compose_notification`, so they work with any
-`notify.*` service.
+All three rely on `stockpile.compose_notification`, so they work with any
+`notify.*` service. The targeted popup blueprint also accepts an optional
+dashboard URL — tapping the notification opens Stockpile directly in the
+companion app.
 
 ## Backup and restore
 
@@ -190,9 +193,9 @@ back into the database; pass `replace: true` to start from a clean slate.
 
 ## Development
 
-Stockpile ships a small pytest suite covering the data layer (alias matching,
-expiration enrichment, snooze filtering, velocity windows, export / import
-round-trips, and ordering preservation).
+Stockpile ships a pytest suite (17 tests) covering the data layer: alias
+matching, expiration enrichment, snooze filtering, velocity windows,
+suggest_restock logic, export / import round-trips, and ordering preservation.
 
 ```bash
 python3 -m venv .venv
@@ -200,6 +203,16 @@ source .venv/bin/activate
 pip install -r requirements_test.txt
 pytest
 ```
+
+To release a new version:
+
+```bash
+python3 scripts/release.py 0.7.0 "Short release description"
+```
+
+This bumps the version in `manifest.json`, `const.py`, and the card JS,
+commits, creates an annotated tag, pushes, and opens a GitHub release — so
+Home Assistant and HACS will always show a proper version number.
 
 ## Data model
 

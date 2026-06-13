@@ -182,3 +182,39 @@ async def test_export_import_roundtrip_replace(db, tmp_path):
         assert packages[0]["remaining"] == 65
     finally:
         await other.async_close()
+
+
+async def test_suggest_restock_flags_low_stock(db):
+    loc = await db.add_location("Pantry")
+    # threshold=4 but only 1 package-equivalent remaining -> low stock
+    pid = await db.add_product(name="Pasta", brand="Barilla", unit="box", threshold=4)
+    await db.add_package(pid, remaining=100, location_id=loc)
+    suggestions = await db.suggest_restock()
+    names = {s["name"] for s in suggestions}
+    assert "Pasta" in names
+    pasta = next(s for s in suggestions if s["name"] == "Pasta")
+    assert pasta["low_stock"] is True
+    assert pasta["suggested_qty"] >= 1
+
+
+async def test_suggest_restock_uses_velocity(db):
+    loc = await db.add_location("Pantry")
+    # No threshold set; rely on velocity alone
+    pid = await db.add_product(name="Rice", unit="bag")
+    pkg = await db.add_package(pid, remaining=100, location_id=loc)
+    # Consume heavily so velocity implies it will run out within horizon
+    await db.consume(pkg, 90)
+    suggestions = await db.suggest_restock(velocity_days=30, horizon_days=60)
+    names = {s["name"] for s in suggestions}
+    assert "Rice" in names
+
+
+async def test_suggest_restock_excludes_well_stocked(db):
+    loc = await db.add_location("Pantry")
+    pid = await db.add_product(name="Salt", threshold=1)
+    await db.add_package(pid, remaining=100, location_id=loc)
+    await db.add_package(pid, remaining=100, location_id=loc)
+    await db.add_package(pid, remaining=100, location_id=loc)
+    # 3 packages well above threshold of 1, no consumption
+    suggestions = await db.suggest_restock()
+    assert all(s["name"] != "Salt" for s in suggestions)

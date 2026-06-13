@@ -34,7 +34,7 @@ Status legend: **Done** · **In progress** · **Planned**
 - **Done** — Daily low-stock + expiring summary (blueprint: `low_stock_daily.yaml`)
 - **Done** — `stockpile.compose_notification` action for any notify service
 - **Done** — Per-product snooze (`stockpile.snooze`) and acknowledge (`stockpile.acknowledge`); notifications respect them
-- **Planned** — Targeted popup on a specific tablet or dashboard
+- **Done** — Targeted popup on a specific device (blueprint: `targeted_popup.yaml`; optional dashboard URL deeplink)
 
 ## Phase 3 — Expiration and history
 
@@ -56,14 +56,15 @@ Status legend: **Done** · **In progress** · **Planned**
 ## Phase 5 — Intelligence and integrations
 
 - **Done** — Shopping-list integration: `stockpile.push_to_todo` adds low / expiring items to any HA todo entity (dedupes by default)
+- **Done** — `stockpile.suggest_restock` returns velocity-based reorder suggestions with quantities
 - **Planned** — Receipt parsing to suggested additions, confirmed by the user
-- **Planned** — Restock-velocity suggestions ("buy 2 packs every 3 weeks")
 
 ## Phase 6 — Distribution
 
 - **Done** — HACS-installable integration with bundled card
 - **Done** — Export / import via `stockpile.export` and `stockpile.import_data`
-- **Done** — Pytest suite covering the data layer (14 tests, runs with `pytest`)
+- **Done** — Pytest suite (17 tests, runs with `pytest`)
+- **Done** — `scripts/release.py` release helper: bumps version files, commits, tags, and creates a GitHub release in one step
 - **Planned** — Submit to the HACS default store
 - **Planned** — Free placement (true x/y grid) as an alternative to ordered layout
 

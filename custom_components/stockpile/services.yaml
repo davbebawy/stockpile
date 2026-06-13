@@ -263,3 +263,30 @@ push_to_todo:
       default: true
       selector:
         boolean:
+
+suggest_restock:
+  name: Suggest restock
+  description: >
+    Returns products that are likely to run out within a time horizon (based on
+    velocity), or that are already below their low-stock threshold. Each entry
+    includes a suggested quantity to order to restore comfortable stock levels.
+    Use response_variable to capture the result.
+  fields:
+    velocity_days:
+      default: 30
+      description: Window in days used to compute average daily consumption.
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+          mode: box
+    horizon_days:
+      default: 14
+      description: Flag a product if it will run out within this many days at current velocity.
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+          mode: box

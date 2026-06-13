@@ -40,6 +40,7 @@ SERVICES = [
     "snooze",
     "acknowledge",
     "push_to_todo",
+    "suggest_restock",
 ]
 
 GET_SUMMARY_SCHEMA = vol.Schema({})
@@ -123,6 +124,13 @@ SNOOZE_SCHEMA = vol.Schema(
     }
 )
 ACKNOWLEDGE_SCHEMA = vol.Schema({vol.Required("product_id"): cv.string})
+
+SUGGEST_RESTOCK_SCHEMA = vol.Schema(
+    {
+        vol.Optional("velocity_days", default=30): vol.All(vol.Coerce(int), vol.Range(min=1, max=365)),
+        vol.Optional("horizon_days", default=14): vol.All(vol.Coerce(int), vol.Range(min=1, max=365)),
+    }
+)
 
 PUSH_TO_TODO_SCHEMA = vol.Schema(
     {
@@ -393,6 +401,18 @@ def async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "acknowledge", acknowledge, ACKNOWLEDGE_SCHEMA)
     hass.services.async_register(
         DOMAIN, "push_to_todo", push_to_todo, PUSH_TO_TODO_SCHEMA, SupportsResponse.OPTIONAL
+    )
+
+    async def suggest_restock(call: ServiceCall) -> ServiceResponse:
+        db = get_db(hass)
+        suggestions = await db.suggest_restock(
+            velocity_days=call.data["velocity_days"],
+            horizon_days=call.data["horizon_days"],
+        )
+        return {"suggestions": suggestions}
+
+    hass.services.async_register(
+        DOMAIN, "suggest_restock", suggest_restock, SUGGEST_RESTOCK_SCHEMA, SupportsResponse.ONLY
     )
 
 

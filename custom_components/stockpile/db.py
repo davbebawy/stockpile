@@ -487,6 +487,63 @@ class InventoryDB:
             for r in rows
         ]
 
+    async def suggest_restock(
+        self,
+        velocity_days: int = 30,
+        horizon_days: int = 14,
+    ) -> list[dict[str, Any]]:
+        """Products that will run out within `horizon_days` at current velocity,
+        or that are already below their low-stock threshold.
+
+        Returns one entry per qualifying product with:
+          - name, brand, unit, threshold
+          - equiv_remaining (packages-equivalent remaining across all packages)
+          - per_day velocity
+          - days_left estimate (None when no velocity data)
+          - suggested_qty: whole packages to bring stock back to 2× the threshold
+            (or 2× the 30-day consumption if no threshold is set)
+        """
+        summary = {r["product_id"]: r for r in await self.get_summary()}
+        velocities = {v["product_id"]: v for v in await self.get_all_velocities(velocity_days)}
+
+        suggestions: list[dict[str, Any]] = []
+        for pid, row in summary.items():
+            equiv = float(row["equiv_remaining"])
+            vel = velocities.get(pid)
+            per_day = vel["per_day"] if vel else 0.0
+
+            # Days until empty, capped to avoid huge numbers
+            if per_day > 0:
+                days_left: int | None = int(equiv / per_day)
+            else:
+                days_left = None
+
+            is_low = bool(row["low_stock"])
+            runs_out_soon = days_left is not None and days_left <= horizon_days
+
+            if not (is_low or runs_out_soon):
+                continue
+
+            # Target stock: 2× threshold or 2× 30-day consumption, at least 1
+            thr = row.get("threshold")
+            target = float(thr) * 2 if thr else max(1.0, per_day * 30 * 2)
+            suggested_qty = max(1, round(target - equiv))
+
+            suggestions.append({
+                "product_id": pid,
+                "name": row["name"],
+                "brand": row["brand"],
+                "unit": row["unit"],
+                "equiv_remaining": round(equiv, 2),
+                "per_day": round(per_day, 4),
+                "days_left": days_left,
+                "low_stock": is_low,
+                "suggested_qty": suggested_qty,
+            })
+
+        suggestions.sort(key=lambda x: (x["days_left"] if x["days_left"] is not None else 999, x["name"]))
+        return suggestions
+
     async def count_packages(self) -> int:
         row = await self._query_one("SELECT COUNT(*) AS c FROM packages")
         return int(row["c"]) if row else 0

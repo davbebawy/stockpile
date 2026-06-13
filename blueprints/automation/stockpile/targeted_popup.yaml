@@ -1,0 +1,121 @@
+blueprint:
+  name: Stockpile — Targeted popup on a specific device
+  description: >
+    When a freezer or cabinet door stays open for a few seconds, push a
+    Stockpile review popup directly to a chosen mobile device or to the
+    Home Assistant persistent-notification panel. Unlike the general
+    door_review_prompt blueprint, this one lets you pick a single
+    notification target (e.g. the tablet mounted next to the freezer)
+    and optionally opens the Stockpile dashboard URL in the companion
+    app via the `url` notification action.
+
+    Suppresses while snoozed and during quiet hours, same as the other
+    blueprints.
+  domain: automation
+  source_url: https://github.com/davbebawwy/stockpile/blob/main/blueprints/automation/stockpile/targeted_popup.yaml
+  input:
+    door_sensor:
+      name: Door / cabinet sensor
+      selector:
+        entity:
+          domain: binary_sensor
+    open_for_seconds:
+      name: Trigger after open for (seconds)
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 300
+          unit_of_measurement: s
+          mode: box
+    notify_target:
+      name: Notify service
+      description: >
+        The notify service to call. Use `notify.persistent_notification`
+        for the HA sidebar, or `notify.mobile_app_your_device` for a
+        phone or tablet.
+      selector:
+        text:
+    dashboard_url:
+      name: Dashboard URL (optional)
+      description: >
+        A URL to open when the user taps the notification, e.g.
+        `/lovelace/stockpile`. Leave blank to omit the action button.
+      default: ""
+      selector:
+        text:
+    kind:
+      name: Kind
+      default: all
+      selector:
+        select:
+          options:
+            - all
+            - low
+            - expiring
+    quiet_hours_start:
+      name: Quiet hours start
+      default: "22:00:00"
+      selector:
+        time:
+    quiet_hours_end:
+      name: Quiet hours end
+      default: "07:00:00"
+      selector:
+        time:
+
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: state
+    entity_id: !input door_sensor
+    to: "on"
+    for:
+      seconds: !input open_for_seconds
+
+condition:
+  - condition: time
+    after: !input quiet_hours_end
+    before: !input quiet_hours_start
+
+action:
+  - service: stockpile.compose_notification
+    data:
+      kind: !input kind
+    response_variable: stockpile_summary
+
+  - if:
+      - condition: template
+        value_template: >
+          {{ (stockpile_summary.low_count | int(0))
+           + (stockpile_summary.expiring_count | int(0)) > 0 }}
+    then:
+      - variables:
+          _url: !input dashboard_url
+          _has_url: "{{ _url | trim | length > 0 }}"
+
+      - service: !input notify_target
+        data:
+          title: "{{ stockpile_summary.title }}"
+          message: "{{ stockpile_summary.message }}"
+          data: >
+            {% if _has_url %}
+            {
+              "actions": [
+                {
+                  "action": "URI",
+                  "title": "Open Stockpile",
+                  "uri": "{{ _url }}"
+                }
+              ],
+              "tag": "stockpile_review",
+              "ttl": 300,
+              "priority": "normal"
+            }
+            {% else %}
+            {
+              "tag": "stockpile_review",
+              "ttl": 300
+            }
+            {% endif %}
