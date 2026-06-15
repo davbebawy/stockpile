@@ -44,13 +44,13 @@ Status legend: **Done** · **In progress** · **Planned**
 - **Done** — Dedicated History tab on the cards (last 200 events)
 - **Done** — Per-user attribution: services infer `who` from the calling HA user
 - **Done** — Per-product velocity (30-day window) surfaced in the detail sheet with a "runs out in N days" estimate
-- **Planned** — Cross-product trend dashboards
+- **Done** — Cross-product trend dashboard (14-day sparklines per product in the Trends tab)
 
 ## Phase 4 — Catalog and input acceleration
 
 - **Done** — Product catalog autocomplete in the in-card Add form
 - **Done** — Alias-aware product matching in `find_product` and the Add form
-- **Planned** — QR codes per package — scan to open the consume sheet
+- **Done** — QR codes per package — "QR code" button in the detail sheet; scan to open the consume sheet via deep link
 - **Planned** — Barcode (UPC) lookup (spotty coverage for warehouse-brand items)
 
 ## Phase 5 — Intelligence and integrations

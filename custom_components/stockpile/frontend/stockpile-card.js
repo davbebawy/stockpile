@@ -68,6 +68,8 @@ class StockpileCard extends HTMLElement {
     this._dragPlaceholder = null;
     this._addOpen = false;
     this._historyView = null;
+    this._trends = null;
+    this._deepLinkHandled = false;
   }
 
   setConfig(config) {
@@ -143,8 +145,16 @@ class StockpileCard extends HTMLElement {
       this._packages = res.packages || [];
       this._products = prods.products || [];
       if (this._view === "history") await this._loadFullHistory();
+      else if (this._view === "trends") await this._loadTrends();
       this._render();
       if (this._selected) this._refreshDetail();
+      if (!this._deepLinkHandled) {
+        const deepPkg = new URLSearchParams(window.location.search).get("stockpile");
+        if (deepPkg && this._packages.find((p) => p.id === deepPkg)) {
+          this._deepLinkHandled = true;
+          this._openDetail(deepPkg);
+        }
+      }
     } catch (e) {
       this._renderError(e);
     }
@@ -214,6 +224,7 @@ class StockpileCard extends HTMLElement {
     this._renderHead();
     if (this._view === "summary") this._renderSummary();
     else if (this._view === "history") this._renderHistory();
+    else if (this._view === "trends") this._renderTrends();
     else this._renderGrid();
   }
 
@@ -242,6 +253,7 @@ class StockpileCard extends HTMLElement {
           <button class="seg-btn ${this._view === "summary" ? "on" : ""}" data-view="summary" role="tab" aria-selected="${this._view === "summary"}">Summary</button>
           <button class="seg-btn ${this._view === "grid" ? "on" : ""}" data-view="grid" role="tab" aria-selected="${this._view === "grid"}">Items</button>
           <button class="seg-btn ${this._view === "history" ? "on" : ""}" data-view="history" role="tab" aria-selected="${this._view === "history"}">History</button>
+          <button class="seg-btn ${this._view === "trends" ? "on" : ""}" data-view="trends" role="tab" aria-selected="${this._view === "trends"}">Trends</button>
         </div>
       </div>
       ${chips}
@@ -254,6 +266,7 @@ class StockpileCard extends HTMLElement {
         this._productFilter = null;
         this._arrange = false;
         if (this._view === "history") this._loadFullHistory().then(() => this._render());
+        else if (this._view === "trends") this._loadTrends().then(() => this._render());
         else this._render();
       })
     );
@@ -739,6 +752,7 @@ class StockpileCard extends HTMLElement {
         <button class="link" data-snooze="24">Snooze 1d</button>
         <button class="link" data-snooze="168">Snooze 7d</button>
         <button class="link" data-ack="1">Acknowledge</button>
+        <button class="link" data-qr="1" title="Show QR code to scan and consume">QR code</button>
       </div>
       <div class="close-row">
         <button class="act danger" data-remove="1">Remove</button>
@@ -759,6 +773,8 @@ class StockpileCard extends HTMLElement {
     );
     const ack = this._sheet.querySelector("[data-ack]");
     if (ack) ack.addEventListener("click", () => this._acknowledge(p.product_id));
+    const qrBtn = this._sheet.querySelector("[data-qr]");
+    if (qrBtn) qrBtn.addEventListener("click", () => this._showQR(p));
   }
 
   async _snooze(productId, hours) {
@@ -772,6 +788,128 @@ class StockpileCard extends HTMLElement {
       await this._hass.callService("stockpile", "acknowledge", { product_id: productId });
       await this._fetch();
     } catch (e) { console.error("stockpile: acknowledge failed", e); }
+  }
+
+  // ----- QR code overlay -------------------------------------------- //
+  _showQR(pkg) {
+    const deepLink = `${window.location.origin}/?stockpile=${pkg.id}`;
+    const qrSrc = `/api/stockpile/qr?url=${encodeURIComponent(deepLink)}`;
+
+    let overlay = this.shadowRoot.querySelector(".qr-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "qr-overlay";
+      overlay.innerHTML = `
+        <div class="qr-sheet">
+          <div class="qr-title">Scan to consume</div>
+          <div class="qr-pkg-name"></div>
+          <img class="qr-img" alt="QR code" />
+          <div class="qr-hint">Scan with your phone camera to open the consume sheet directly.</div>
+          <div class="qr-id-row"><code class="qr-id"></code></div>
+          <button class="close qr-close">Close</button>
+        </div>`;
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.classList.remove("open");
+      });
+      overlay.querySelector(".qr-close").addEventListener("click", () =>
+        overlay.classList.remove("open")
+      );
+      this.shadowRoot.appendChild(overlay);
+    }
+
+    overlay.querySelector(".qr-pkg-name").textContent = pkg.product_name + (pkg.brand ? ` · ${pkg.brand}` : "");
+    overlay.querySelector(".qr-id").textContent = pkg.id;
+    overlay.querySelector(".qr-img").src = qrSrc;
+    overlay.classList.add("open");
+  }
+
+  // ----- trends view ------------------------------------------------ //
+  async _loadTrends() {
+    try {
+      const res = await this._hass.connection.sendMessagePromise({
+        type: "stockpile/trends",
+        days: 14,
+      });
+      this._trends = res.trends || [];
+    } catch (e) {
+      this._trends = [];
+    }
+  }
+
+  _renderTrends() {
+    if (this._trends == null) {
+      this._body.innerHTML = `<div class="empty">Loading trends…</div>`;
+      return;
+    }
+    if (!this._trends.length) {
+      this._body.innerHTML = `<div class="empty">No consumption data in the last 14 days.</div>`;
+      return;
+    }
+
+    const today = new Date();
+    const dateKeys = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      dateKeys.push(d.toISOString().slice(0, 10));
+    }
+
+    const maxVal = Math.max(
+      1e-9,
+      ...this._trends.flatMap((t) => dateKeys.map((dk) => t.daily[dk] || 0))
+    );
+
+    const rows = this._trends.map((t) => {
+      const spark = this._sparkline(t.daily, dateKeys, maxVal);
+      const qty = t.unit
+        ? ` <span class="tr-unit">${this._esc(t.unit)}</span>`
+        : "";
+      return `
+        <div class="tr-row">
+          <div class="tr-name">${this._esc(t.name)}</div>
+          <div class="tr-total">${this._round(t.total_equiv)}${qty}</div>
+          <div class="tr-spark">${spark}</div>
+        </div>`;
+    }).join("");
+
+    const oldest = dateKeys[0].slice(5);
+    const newest = dateKeys[dateKeys.length - 1].slice(5);
+    this._body.innerHTML = `
+      <div class="tr-head">
+        <span class="tr-h-name">Product</span>
+        <span class="tr-h-total">14d used</span>
+        <div class="tr-h-spark">
+          <span>${oldest}</span>
+          <span>today</span>
+        </div>
+      </div>
+      <div class="tr-list">${rows}</div>
+      <div class="tr-foot">
+        <button class="link" data-tr-refresh="1">Refresh</button>
+      </div>`;
+
+    const btn = this._body.querySelector("[data-tr-refresh]");
+    if (btn) btn.addEventListener("click", async () => {
+      this._trends = null;
+      this._render();
+      await this._loadTrends();
+      this._render();
+    });
+  }
+
+  _sparkline(daily, dateKeys, maxVal) {
+    const BAR_W = 7;
+    const GAP = 1;
+    const H = 28;
+    const totalW = dateKeys.length * (BAR_W + GAP) - GAP;
+    const bars = dateKeys.map((dk, i) => {
+      const v = daily[dk] || 0;
+      const h = v > 0 ? Math.max(3, Math.round((v / maxVal) * H)) : 1;
+      const fill = v > 0 ? "var(--sp-primary)" : "var(--sp-divider)";
+      const x = i * (BAR_W + GAP);
+      return `<rect x="${x}" y="${H - h}" width="${BAR_W}" height="${h}" rx="1.5" fill="${fill}"/>`;
+    }).join("");
+    return `<svg width="${totalW}" height="${H}" viewBox="0 0 ${totalW} ${H}" aria-hidden="true">${bars}</svg>`;
   }
 
   async _consume(id, amount) {
@@ -1528,6 +1666,119 @@ class StockpileCard extends HTMLElement {
 
       @keyframes sp-fade { from { opacity: 0 } to { opacity: 1 } }
       @keyframes sp-pop  { from { transform: translateY(8px) scale(.98); opacity: 0 } to { transform: none; opacity: 1 } }
+
+      /* Trends view */
+      .tr-head {
+        display: grid;
+        grid-template-columns: 1fr 5rem 113px;
+        gap: 8px;
+        align-items: center;
+        padding: 4px 6px 8px;
+        border-bottom: 1px solid var(--sp-divider);
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        color: var(--sp-fg-dim);
+      }
+      .tr-h-spark {
+        display: flex;
+        justify-content: space-between;
+        font-size: .65rem;
+      }
+      .tr-list { display: flex; flex-direction: column; }
+      .tr-row {
+        display: grid;
+        grid-template-columns: 1fr 5rem 113px;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 6px;
+        border-bottom: 1px solid var(--sp-divider);
+      }
+      .tr-row:last-child { border-bottom: none; }
+      .tr-name {
+        font-weight: 600;
+        font-size: .9rem;
+        color: var(--sp-fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tr-total {
+        font-size: .85rem;
+        font-weight: 600;
+        color: var(--sp-fg);
+        text-align: right;
+        white-space: nowrap;
+      }
+      .tr-unit { font-weight: 400; color: var(--sp-fg-dim); }
+      .tr-spark { display: flex; align-items: flex-end; }
+      .tr-foot {
+        display: flex;
+        justify-content: flex-end;
+        padding: 6px 0 0;
+      }
+
+      /* QR overlay */
+      .qr-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 12;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,.55);
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        animation: sp-fade .15s ease;
+      }
+      .qr-overlay.open { display: flex; }
+      .qr-sheet {
+        background: var(--sp-surface-2);
+        color: var(--sp-fg);
+        border-radius: 20px;
+        padding: 24px 20px 20px;
+        box-shadow: var(--sp-elevation-strong);
+        animation: sp-pop .18s cubic-bezier(.2,.8,.2,1);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        width: min(320px, 88vw);
+      }
+      .qr-title {
+        font-size: 1rem;
+        font-weight: 700;
+        letter-spacing: -.01em;
+        color: var(--sp-fg);
+      }
+      .qr-pkg-name {
+        font-size: .85rem;
+        color: var(--sp-fg-dim);
+        text-align: center;
+      }
+      .qr-img {
+        width: 200px;
+        height: 200px;
+        border-radius: 12px;
+        background: #fff;
+        padding: 8px;
+      }
+      .qr-hint {
+        font-size: .78rem;
+        color: var(--sp-fg-dim);
+        text-align: center;
+        max-width: 240px;
+        line-height: 1.5;
+      }
+      .qr-id-row { margin-top: -4px; }
+      .qr-id {
+        font-size: .72rem;
+        background: var(--sp-surface);
+        padding: 2px 8px;
+        border-radius: 6px;
+        color: var(--sp-fg-dim);
+      }
 
       @media (prefers-reduced-motion: reduce) {
         .tile, .level, .r-bar span, .overlay, .sheet { transition: none; animation: none; }

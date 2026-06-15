@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from .const import DB_FILENAME, DOMAIN, PLATFORMS
 from .db import InventoryDB
 from .frontend_register import async_register_frontend
+from .http_views import StockpileQRView
 from .services import async_register_services
 from .websocket import async_register_websocket
 
@@ -21,6 +22,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async_register_services(hass)
     async_register_websocket(hass)
     await async_register_frontend(hass)
+    hass.http.register_view(StockpileQRView())
     hass.data.setdefault(DOMAIN, {})["_registered"] = True
     return True
 

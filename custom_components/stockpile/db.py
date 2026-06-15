@@ -548,6 +548,47 @@ class InventoryDB:
         row = await self._query_one("SELECT COUNT(*) AS c FROM packages")
         return int(row["c"]) if row else 0
 
+    async def get_trends(self, days: int = 14) -> list[dict[str, Any]]:
+        """Daily consumption per product for the last N days.
+
+        Returns products sorted by total consumption descending. Each entry
+        has a ``daily`` dict mapping ISO date strings (YYYY-MM-DD) to the
+        number of equivalent packages consumed that day.
+        """
+        days = max(1, min(90, int(days)))
+        cutoff = (dt_util.utcnow() - _timedelta(days=days)).isoformat()
+        rows = await self._query(
+            """SELECT cl.product_id, pr.name, pr.unit,
+                      substr(cl.ts, 1, 10) AS day,
+                      SUM(cl.amount) AS total_amount
+               FROM consumption_log cl
+               JOIN products pr ON pr.id = cl.product_id
+               WHERE cl.ts >= ?
+               GROUP BY cl.product_id, day
+               ORDER BY cl.product_id, day""",
+            (cutoff,),
+        )
+        groups: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            pid = r["product_id"]
+            if pid not in groups:
+                groups[pid] = {
+                    "product_id": pid,
+                    "name": r["name"],
+                    "unit": r["unit"],
+                    "total_equiv": 0.0,
+                    "daily": {},
+                }
+            equiv = float(r["total_amount"] or 0) / 100.0
+            groups[pid]["daily"][r["day"]] = round(equiv, 3)
+            groups[pid]["total_equiv"] += equiv
+
+        result = list(groups.values())
+        for r in result:
+            r["total_equiv"] = round(r["total_equiv"], 3)
+        result.sort(key=lambda x: -x["total_equiv"])
+        return result
+
     # ------------------------------------------------------------------ #
     # export / import (JSON backup)
     # ------------------------------------------------------------------ #
