@@ -264,6 +264,23 @@ push_to_todo:
       selector:
         boolean:
 
+parse_receipt:
+  name: Parse receipt
+  description: >
+    Parse raw receipt text and return a list of product suggestions. Each
+    suggestion includes the cleaned name, quantity, unit, and whether it
+    matches an existing catalog product. Intended to be called from the
+    Stockpile card UI or an automation script; use response_variable to
+    capture the result.
+  fields:
+    text:
+      required: true
+      description: Raw receipt text (paste directly from clipboard or OCR output).
+      example: "GROUND BEEF 80/20 3LB    $8.99\nPASTA 12OZ    $1.89"
+      selector:
+        text:
+          multiline: true
+
 suggest_restock:
   name: Suggest restock
   description: >

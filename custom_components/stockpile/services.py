@@ -6,6 +6,7 @@ and the frontend card can react. Service calls that need to return data
 """
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import voluptuous as vol
@@ -21,6 +22,58 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, EVENT_UPDATED
 from .helpers import get_db
+
+# --------------------------------------------------------------------------- #
+# Receipt parser (pure-Python, no external deps)
+# --------------------------------------------------------------------------- #
+_PRICE_RE   = re.compile(r'\$?\s*\d+[.,]\d{2}(?:\s*[A-Z])?\s*$')
+_QTY_X_RE   = re.compile(r'^(\d+(?:\.\d+)?)\s*[xX]\s+')
+_AT_RE      = re.compile(r'\b\d+(?:\.\d+)?\s*(?:lb|lbs?|oz|kg|g)\s*@\s*\$?\d+[.,]\d+/\w+', re.I)
+_WEIGHT_RE  = re.compile(r'\b(\d+(?:\.\d+)?)\s*(lb|lbs?|oz|kg|gal|ct|pk|pack|ea|each)\b', re.I)
+_JUNK_RE    = re.compile(r'\b\d{5,}\b|#\d+|/[Ll][Bb]')
+_SKIP_WORDS = frozenset([
+    'subtotal', 'total', 'tax', 'change', 'balance', 'cash', 'credit', 'debit',
+    'visa', 'mastercard', 'amex', 'discover', 'thank', 'receipt', 'store',
+    'cashier', 'transaction', 'payment', 'savings', 'discount', 'coupon',
+    'manager', 'special', 'sale', 'tel', 'phone', 'fax', 'address', 'www',
+    'http', 'member', 'loyalty', 'reward', 'points',
+])
+_UNIT_NORM = {'lbs': 'lb', 'ozs': 'oz', 'kgs': 'kg', 'packs': 'pack', 'pks': 'pack'}
+
+
+def _parse_receipt_text(text: str) -> list[dict]:
+    """Extract product candidates from raw receipt text."""
+    out: list[dict] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if len(line) < 3:
+            continue
+        if any(w in line.lower() for w in _SKIP_WORDS):
+            continue
+        line = _PRICE_RE.sub('', line).strip()
+        if not line:
+            continue
+        line = _AT_RE.sub('', line).strip()
+        qty = 1.0
+        unit: str | None = None
+        m = _QTY_X_RE.match(line)
+        if m:
+            qty = float(m.group(1))
+            line = line[m.end():]
+        wm = _WEIGHT_RE.search(line)
+        if wm:
+            qty = float(wm.group(1))
+            u = _UNIT_NORM.get(wm.group(2).lower(), wm.group(2).lower().rstrip('s'))
+            unit = 'each' if u in ('ea', 'each') else u
+            line = (line[:wm.start()] + line[wm.end():])
+        line = _JUNK_RE.sub('', line).strip(' -.,:/\\')
+        line = re.sub(r'\s+', ' ', line).strip()
+        if len(line) < 2:
+            continue
+        name = ' '.join(w.capitalize() for w in line.split())
+        out.append({'name': name, 'qty': round(qty, 3), 'unit': unit})
+    return out
+
 
 SERVICES = [
     "add_product",
@@ -41,6 +94,7 @@ SERVICES = [
     "acknowledge",
     "push_to_todo",
     "suggest_restock",
+    "parse_receipt",
 ]
 
 GET_SUMMARY_SCHEMA = vol.Schema({})
@@ -124,6 +178,8 @@ SNOOZE_SCHEMA = vol.Schema(
     }
 )
 ACKNOWLEDGE_SCHEMA = vol.Schema({vol.Required("product_id"): cv.string})
+
+PARSE_RECEIPT_SCHEMA = vol.Schema({vol.Required("text"): cv.string})
 
 SUGGEST_RESTOCK_SCHEMA = vol.Schema(
     {
@@ -413,6 +469,26 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN, "suggest_restock", suggest_restock, SUGGEST_RESTOCK_SCHEMA, SupportsResponse.ONLY
+    )
+
+    async def parse_receipt(call: ServiceCall) -> ServiceResponse:
+        db = get_db(hass)
+        raw = _parse_receipt_text(call.data["text"])
+        suggestions = []
+        for item in raw:
+            match = await db.find_product(item["name"])
+            suggestions.append({
+                "name": match["name"] if match else item["name"],
+                "qty": item["qty"],
+                "unit": item["unit"] or (match.get("unit") if match else None),
+                "matched": match is not None,
+                "product_id": match["id"] if match else None,
+                "brand": match.get("brand") if match else None,
+            })
+        return {"suggestions": suggestions, "total": len(suggestions)}
+
+    hass.services.async_register(
+        DOMAIN, "parse_receipt", parse_receipt, PARSE_RECEIPT_SCHEMA, SupportsResponse.ONLY
     )
 
 

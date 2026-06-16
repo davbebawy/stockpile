@@ -407,6 +407,7 @@ class StockpileCard extends HTMLElement {
                <button class="link" data-cols="1" aria-label="More columns">+ cols</button>
                <button class="btn-primary" data-arrange="0">Done</button>`
             : `<button class="link" data-add="1">+ Add</button>
+               <button class="link" data-receipt="1">Receipt</button>
                <button class="link" data-arrange="1">Arrange</button>`
         }
       </div>`;
@@ -491,6 +492,8 @@ class StockpileCard extends HTMLElement {
     );
     const add = this._body.querySelector("[data-add]");
     if (add) add.addEventListener("click", () => this._openAdd());
+    const rcpt = this._body.querySelector("[data-receipt]");
+    if (rcpt) rcpt.addEventListener("click", () => this._openReceipt());
   }
 
   // ----- pointer-based drag to arrange (touch-friendly) ------------- //
@@ -1039,6 +1042,171 @@ class StockpileCard extends HTMLElement {
         box.textContent = `Could not add: ${String(err.message || err)}`;
       }
     });
+  }
+
+  // ----- receipt overlay -------------------------------------------- //
+  _openReceipt() {
+    let ov = this.shadowRoot.querySelector(".rx-overlay");
+    if (!ov) {
+      ov = document.createElement("div");
+      ov.className = "rx-overlay";
+      ov.addEventListener("click", (e) => { if (e.target === ov) ov.classList.remove("open"); });
+      this.shadowRoot.appendChild(ov);
+    }
+    this._rxOv = ov;
+    this._renderReceiptInput();
+    ov.classList.add("open");
+  }
+
+  _renderReceiptInput() {
+    this._rxOv.innerHTML = `
+      <div class="rx-sheet">
+        <h2>Parse receipt</h2>
+        <p class="rx-hint">Paste receipt text below. The parser strips prices, extracts names and quantities, then matches against your catalog.</p>
+        <textarea class="rx-ta" rows="9" placeholder="GROUND BEEF 80/20 3LB    $8.99&#10;KIRKLAND PASTA 12OZ x4    $7.96&#10;PAPER TOWELS 6PK    $14.99&#10;..."></textarea>
+        <div class="rx-foot">
+          <button class="close rx-cancel">Cancel</button>
+          <button class="btn-primary rx-parse">Parse</button>
+        </div>
+      </div>`;
+    this._rxOv.querySelector(".rx-cancel").addEventListener("click", () => this._rxOv.classList.remove("open"));
+    this._rxOv.querySelector(".rx-parse").addEventListener("click", () => this._runReceiptParse());
+  }
+
+  async _runReceiptParse() {
+    const text = this._rxOv.querySelector(".rx-ta").value.trim();
+    if (!text) return;
+    const btn = this._rxOv.querySelector(".rx-parse");
+    btn.disabled = true;
+    btn.textContent = "Parsing…";
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "stockpile",
+        service: "parse_receipt",
+        service_data: { text },
+        return_response: true,
+      });
+      const suggestions = (result?.response?.suggestions) || [];
+      this._rxSugg = suggestions;
+      this._renderReceiptReview(suggestions);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Parse";
+      const err = this._rxOv.querySelector(".rx-err") || (() => {
+        const d = document.createElement("div");
+        d.className = "rx-err";
+        this._rxOv.querySelector(".rx-sheet").appendChild(d);
+        return d;
+      })();
+      err.textContent = `Error: ${e.message || String(e)}`;
+    }
+  }
+
+  _renderReceiptReview(suggestions) {
+    if (!suggestions.length) {
+      this._rxOv.innerHTML = `
+        <div class="rx-sheet">
+          <h2>No products found</h2>
+          <p class="rx-hint">Could not extract any product lines. Try pasting a different section of the receipt.</p>
+          <div class="rx-foot"><button class="btn-primary rx-back">Back</button></div>
+        </div>`;
+      this._rxOv.querySelector(".rx-back").addEventListener("click", () => this._renderReceiptInput());
+      return;
+    }
+
+    const locOpts = this._locations
+      .map((l) => `<option value="${l.id}">${this._esc(l.name)}</option>`)
+      .join("");
+    const locPicker = this._locations.length
+      ? `<label class="rx-loc-label">Add to location
+           <select class="rx-loc"><option value="">— none —</option>${locOpts}</select>
+         </label>`
+      : "";
+
+    const rows = suggestions.map((s, i) => {
+      const badge = s.matched
+        ? `<span class="rx-badge match">Catalog</span>`
+        : `<span class="rx-badge new">New</span>`;
+      return `
+        <div class="rx-item" data-i="${i}">
+          <input type="checkbox" class="rx-cb" checked />
+          <div class="rx-item-info">
+            <input class="rx-name" type="text" value="${this._esc(s.name)}" />
+            <div class="rx-item-sub">${badge}${s.brand ? ` <span class="rx-brand">${this._esc(s.brand)}</span>` : ""}</div>
+          </div>
+          <div class="rx-item-nums">
+            <input class="rx-qty" type="number" min="0.1" step="0.1" value="${s.qty || 1}" title="Quantity" />
+            <input class="rx-unit" type="text" value="${this._esc(s.unit || "")}" placeholder="unit" title="Unit" />
+          </div>
+        </div>`;
+    }).join("");
+
+    this._rxOv.innerHTML = `
+      <div class="rx-sheet rx-review">
+        <div class="rx-rev-head">
+          <h2>Review items</h2>
+          <button class="link rx-selall" title="Toggle all">All</button>
+        </div>
+        <div class="rx-list">${rows}</div>
+        <div class="rx-rev-foot">
+          ${locPicker}
+          <div class="rx-foot">
+            <button class="close rx-back">Back</button>
+            <button class="btn-primary rx-confirm">Add checked</button>
+          </div>
+        </div>
+      </div>`;
+
+    const selAll = this._rxOv.querySelector(".rx-selall");
+    selAll.addEventListener("click", () => {
+      const cbs = [...this._rxOv.querySelectorAll(".rx-cb")];
+      const allOn = cbs.every((c) => c.checked);
+      cbs.forEach((c) => (c.checked = !allOn));
+    });
+    this._rxOv.querySelector(".rx-back").addEventListener("click", () => this._renderReceiptInput());
+    this._rxOv.querySelector(".rx-confirm").addEventListener("click", () => this._addReceiptItems());
+  }
+
+  async _addReceiptItems() {
+    const locEl = this._rxOv.querySelector(".rx-loc");
+    const locId = locEl ? locEl.value || undefined : undefined;
+    const toAdd = [];
+
+    for (const row of this._rxOv.querySelectorAll(".rx-item")) {
+      if (!row.querySelector(".rx-cb").checked) continue;
+      const i = Number(row.dataset.i);
+      const s = this._rxSugg[i];
+      const name = row.querySelector(".rx-name").value.trim() || s.name;
+      const qty = Number(row.querySelector(".rx-qty").value) || 1;
+      const unit = row.querySelector(".rx-unit").value.trim() || s.unit || undefined;
+      const payload = { remaining: 100, quantity: qty };
+      if (s.product_id) {
+        payload.product_id = s.product_id;
+      } else {
+        payload.name = name;
+        if (unit) payload.unit = unit;
+      }
+      if (locId) payload.location_id = locId;
+      toAdd.push(payload);
+    }
+
+    if (!toAdd.length) { this._rxOv.classList.remove("open"); return; }
+
+    const btn = this._rxOv.querySelector(".rx-confirm");
+    btn.disabled = true;
+    btn.textContent = `Adding ${toAdd.length}…`;
+
+    for (const payload of toAdd) {
+      try {
+        await this._hass.callService("stockpile", "add_package", payload);
+      } catch (e) {
+        console.error("stockpile: failed to add receipt item", payload, e);
+      }
+    }
+
+    this._rxOv.classList.remove("open");
+    await this._fetch();
   }
 
   // ------------------------------------------------------------------ //
@@ -1717,6 +1885,145 @@ class StockpileCard extends HTMLElement {
         display: flex;
         justify-content: flex-end;
         padding: 6px 0 0;
+      }
+
+      /* Receipt overlay */
+      .rx-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 13;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,.55);
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        animation: sp-fade .15s ease;
+      }
+      .rx-overlay.open { display: flex; }
+      .rx-sheet {
+        background: var(--sp-surface-2);
+        color: var(--sp-fg);
+        border-radius: 20px;
+        padding: 20px;
+        box-shadow: var(--sp-elevation-strong);
+        animation: sp-pop .18s cubic-bezier(.2,.8,.2,1);
+        width: min(520px, 94vw);
+        max-height: 88vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .rx-sheet h2 { margin: 0; font-size: 1.12rem; font-weight: 700; }
+      .rx-hint { margin: 0; font-size: .82rem; color: var(--sp-fg-dim); line-height: 1.5; }
+      .rx-ta {
+        font: inherit;
+        font-size: .88rem;
+        resize: vertical;
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-sm);
+        color: var(--sp-fg);
+        padding: 10px;
+        outline: none;
+        transition: border-color .15s ease;
+      }
+      .rx-ta:focus { border-color: var(--sp-primary); }
+      .rx-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 4px;
+      }
+      .rx-err { font-size: .82rem; color: var(--error-color); }
+
+      .rx-review { max-height: 88vh; }
+      .rx-rev-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .rx-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-right: 2px;
+      }
+      .rx-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        background: var(--sp-surface);
+        border-radius: var(--sp-radius-sm);
+        border: 1px solid var(--sp-divider);
+      }
+      .rx-cb { flex: 0 0 18px; width: 18px; height: 18px; accent-color: var(--sp-primary); cursor: pointer; }
+      .rx-item-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+      .rx-name {
+        font: inherit;
+        font-size: .9rem;
+        font-weight: 600;
+        background: none;
+        border: none;
+        border-bottom: 1px solid transparent;
+        color: var(--sp-fg);
+        padding: 0;
+        width: 100%;
+        outline: none;
+        transition: border-color .15s;
+      }
+      .rx-name:focus { border-bottom-color: var(--sp-primary); }
+      .rx-item-sub { display: flex; align-items: center; gap: 6px; }
+      .rx-badge {
+        font-size: .62rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        padding: 1px 6px;
+        border-radius: var(--sp-radius-pill);
+        border: 1px solid currentColor;
+      }
+      .rx-badge.match { color: var(--success-color, #2e7d32); }
+      .rx-badge.new { color: var(--sp-fg-dim); }
+      .rx-brand { font-size: .72rem; color: var(--sp-fg-dim); }
+      .rx-item-nums { display: flex; gap: 6px; flex: 0 0 auto; }
+      .rx-qty, .rx-unit {
+        font: inherit;
+        font-size: .82rem;
+        background: var(--sp-surface-2);
+        border: 1px solid var(--sp-divider);
+        border-radius: 6px;
+        color: var(--sp-fg);
+        padding: 4px 6px;
+        outline: none;
+        transition: border-color .15s;
+      }
+      .rx-qty { width: 58px; }
+      .rx-unit { width: 54px; }
+      .rx-qty:focus, .rx-unit:focus { border-color: var(--sp-primary); }
+      .rx-rev-foot { display: flex; flex-direction: column; gap: 8px; }
+      .rx-loc-label {
+        display: grid;
+        gap: 4px;
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        color: var(--sp-fg-dim);
+      }
+      .rx-loc {
+        font: inherit;
+        font-size: .9rem;
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-sm);
+        color: var(--sp-fg);
+        padding: 8px 10px;
+        outline: none;
       }
 
       /* QR overlay */

@@ -57,7 +57,7 @@ Status legend: **Done** · **In progress** · **Planned**
 
 - **Done** — Shopping-list integration: `stockpile.push_to_todo` adds low / expiring items to any HA todo entity (dedupes by default)
 - **Done** — `stockpile.suggest_restock` returns velocity-based reorder suggestions with quantities
-- **Planned** — Receipt parsing to suggested additions, confirmed by the user
+- **Done** — Receipt parsing: paste receipt text → parser extracts products → user reviews with checkboxes → bulk add confirmed items
 
 ## Phase 6 — Distribution
 
