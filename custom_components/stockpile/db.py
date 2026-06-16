@@ -102,24 +102,30 @@ class InventoryDB:
         await self._migrate()
 
     async def _migrate(self) -> None:
-        """Lightweight column migrations for DBs created by older versions."""
+        """Lightweight column migrations for DBs created by older versions.
+
+        Each check re-queries PRAGMA so that a freshly-added column is visible
+        to later checks in the same migration run.
+        """
         assert self._db is not None
-        cols = await self._query("PRAGMA table_info(packages)")
-        names = {c["name"] for c in cols}
-        if "position" not in names:
+
+        async def _has_col(table: str, col: str) -> bool:
+            rows = await self._query(f"PRAGMA table_info({table})")
+            return any(r["name"] == col for r in rows)
+
+        if not await _has_col("packages", "position"):
             await self._db.execute("ALTER TABLE packages ADD COLUMN position REAL")
             await self._db.execute(
                 "UPDATE packages SET position = rowid WHERE position IS NULL"
             )
             await self._db.commit()
-        if "loc_x" not in names:
+
+        if not await _has_col("packages", "loc_x"):
             await self._db.execute("ALTER TABLE packages ADD COLUMN loc_x REAL")
             await self._db.execute("ALTER TABLE packages ADD COLUMN loc_y REAL")
             await self._db.commit()
 
-        loc_cols = await self._query("PRAGMA table_info(locations)")
-        loc_names = {c["name"] for c in loc_cols}
-        if "template_id" not in loc_names:
+        if not await _has_col("locations", "template_id"):
             await self._db.execute("ALTER TABLE locations ADD COLUMN template_id TEXT")
             await self._db.execute("ALTER TABLE locations ADD COLUMN template_config TEXT")
             await self._db.commit()
@@ -309,8 +315,21 @@ class InventoryDB:
         pkg = await self.get_package(package_id)
         if pkg is None:
             return None
-        delta = pkg["remaining"] - remaining
-        await self._write("UPDATE packages SET remaining = ? WHERE id = ?", (remaining, package_id))
+        # Read old value inside the lock so delta in the audit log is accurate
+        # even when concurrent service calls are running.
+        async with self._write_lock:
+            assert self._db is not None
+            async with self._db.execute(
+                "SELECT remaining FROM packages WHERE id = ?", (package_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            delta = float(row[0]) - remaining
+            await self._db.execute(
+                "UPDATE packages SET remaining = ? WHERE id = ?", (remaining, package_id)
+            )
+            await self._db.commit()
         await self._log(package_id, pkg["product_id"], delta, remaining, who)
         return await self.get_package(package_id)
 
@@ -318,8 +337,20 @@ class InventoryDB:
         pkg = await self.get_package(package_id)
         if pkg is None:
             return None
-        new_remaining = max(0.0, pkg["remaining"] - amount)
-        await self._write("UPDATE packages SET remaining = ? WHERE id = ?", (new_remaining, package_id))
+        # Atomic SQL update + locked re-read prevents two concurrent consume()
+        # calls from both reading the same remaining and clobbering each other.
+        async with self._write_lock:
+            assert self._db is not None
+            await self._db.execute(
+                "UPDATE packages SET remaining = MAX(0.0, MIN(100.0, remaining - ?)) WHERE id = ?",
+                (amount, package_id),
+            )
+            async with self._db.execute(
+                "SELECT remaining FROM packages WHERE id = ?", (package_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            new_remaining = float(row[0]) if row else 0.0
+            await self._db.commit()
         await self._log(package_id, pkg["product_id"], amount, new_remaining, who)
         return await self.get_package(package_id)
 
@@ -336,18 +367,22 @@ class InventoryDB:
         if not ids:
             return
         placeholders = ",".join("?" for _ in ids)
-        rows = await self._query(
-            f"SELECT id, position, rowid FROM packages WHERE id IN ({placeholders})", tuple(ids)
-        )
-        if not rows:
-            return
-        # Use existing positions as the slots; fall back to rowid if NULL.
-        slots = sorted(
-            (r["position"] if r["position"] is not None else float(r["rowid"]))
-            for r in rows
-        )
+        # Hold the lock across the read + write so a concurrent add_package /
+        # remove_package can't produce a gap or collision in the slot list.
         async with self._write_lock:
             assert self._db is not None
+            async with self._db.execute(
+                f"SELECT id, position, rowid FROM packages WHERE id IN ({placeholders})",
+                tuple(ids),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return
+            # Use existing positions as the slots; fall back to rowid if NULL.
+            slots = sorted(
+                (r["position"] if r["position"] is not None else float(r["rowid"]))
+                for r in rows
+            )
             for slot, pid in zip(slots, ids):
                 await self._db.execute(
                     "UPDATE packages SET position = ? WHERE id = ?", (slot, pid)
@@ -661,72 +696,80 @@ class InventoryDB:
             raise ValueError(f"unsupported export version: {payload.get('version')}")
 
         async with self._write_lock:
-            if replace:
-                for tbl in ("consumption_log", "packages", "products", "locations"):
-                    await self._db.execute(f"DELETE FROM {tbl}")
-
+            # SAVEPOINT makes the whole import atomic: if any insert fails,
+            # the DELETEs (replace=True) roll back along with the partial inserts.
+            await self._db.execute("SAVEPOINT sp_import")
             counts = {"locations": 0, "products": 0, "packages": 0, "log": 0}
+            try:
+                if replace:
+                    for tbl in ("consumption_log", "packages", "products", "locations"):
+                        await self._db.execute(f"DELETE FROM {tbl}")
 
-            for loc in payload.get("locations", []):
-                await self._db.execute(
-                    "INSERT OR REPLACE INTO locations "
-                    "(id, name, parent, template_id, template_config) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (loc["id"], loc["name"], loc.get("parent"),
-                     loc.get("template_id"), loc.get("template_config")),
-                )
-                counts["locations"] += 1
+                for loc in payload.get("locations", []):
+                    await self._db.execute(
+                        "INSERT OR REPLACE INTO locations "
+                        "(id, name, parent, template_id, template_config) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (loc["id"], loc["name"], loc.get("parent"),
+                         loc.get("template_id"), loc.get("template_config")),
+                    )
+                    counts["locations"] += 1
 
-            for pr in payload.get("products", []):
-                aliases = pr.get("aliases") or []
-                if isinstance(aliases, str):
-                    try:
-                        aliases = json.loads(aliases)
-                    except ValueError:
-                        aliases = []
-                await self._db.execute(
-                    "INSERT OR REPLACE INTO products "
-                    "(id, name, brand, unit, category, image, aliases, threshold, created) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        pr["id"], pr["name"], pr.get("brand"), pr.get("unit"),
-                        pr.get("category"), pr.get("image"),
-                        json.dumps(aliases), pr.get("threshold"),
-                        pr.get("created") or _now(),
-                    ),
-                )
-                counts["products"] += 1
+                for pr in payload.get("products", []):
+                    aliases = pr.get("aliases") or []
+                    if isinstance(aliases, str):
+                        try:
+                            aliases = json.loads(aliases)
+                        except ValueError:
+                            aliases = []
+                    await self._db.execute(
+                        "INSERT OR REPLACE INTO products "
+                        "(id, name, brand, unit, category, image, aliases, threshold, created) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            pr["id"], pr["name"], pr.get("brand"), pr.get("unit"),
+                            pr.get("category"), pr.get("image"),
+                            json.dumps(aliases), pr.get("threshold"),
+                            pr.get("created") or _now(),
+                        ),
+                    )
+                    counts["products"] += 1
 
-            for pk in payload.get("packages", []):
-                await self._db.execute(
-                    "INSERT OR REPLACE INTO packages "
-                    "(id, product_id, remaining, quantity, location_id, position, "
-                    "loc_x, loc_y, added, frozen, expires, notes) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        pk["id"], pk["product_id"], pk.get("remaining", 100.0),
-                        pk.get("quantity", 1.0), pk.get("location_id"),
-                        pk.get("position"), pk.get("loc_x"), pk.get("loc_y"),
-                        pk.get("added") or _now(),
-                        pk.get("frozen"), pk.get("expires"), pk.get("notes"),
-                    ),
-                )
-                counts["packages"] += 1
+                for pk in payload.get("packages", []):
+                    await self._db.execute(
+                        "INSERT OR REPLACE INTO packages "
+                        "(id, product_id, remaining, quantity, location_id, position, "
+                        "loc_x, loc_y, added, frozen, expires, notes) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            pk["id"], pk["product_id"], pk.get("remaining", 100.0),
+                            pk.get("quantity", 1.0), pk.get("location_id"),
+                            pk.get("position"), pk.get("loc_x"), pk.get("loc_y"),
+                            pk.get("added") or _now(),
+                            pk.get("frozen"), pk.get("expires"), pk.get("notes"),
+                        ),
+                    )
+                    counts["packages"] += 1
 
-            for ev in payload.get("consumption_log", []):
-                await self._db.execute(
-                    "INSERT INTO consumption_log "
-                    "(package_id, product_id, amount, remaining_after, who, ts) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        ev.get("package_id"), ev.get("product_id"),
-                        ev.get("amount"), ev.get("remaining_after"),
-                        ev.get("who"), ev.get("ts") or _now(),
-                    ),
-                )
-                counts["log"] += 1
+                for ev in payload.get("consumption_log", []):
+                    await self._db.execute(
+                        "INSERT INTO consumption_log "
+                        "(package_id, product_id, amount, remaining_after, who, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            ev.get("package_id"), ev.get("product_id"),
+                            ev.get("amount"), ev.get("remaining_after"),
+                            ev.get("who"), ev.get("ts") or _now(),
+                        ),
+                    )
+                    counts["log"] += 1
 
-            await self._db.commit()
+                await self._db.execute("RELEASE sp_import")
+                await self._db.commit()
+            except Exception:
+                await self._db.execute("ROLLBACK TO sp_import")
+                await self._db.execute("RELEASE sp_import")
+                raise
             return counts
 
     # ------------------------------------------------------------------ #

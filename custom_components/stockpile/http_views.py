@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import io
+from urllib.parse import urlparse
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
 
 class StockpileQRView(HomeAssistantView):
-    """Return an SVG QR code for any URL passed as the ``url`` query parameter.
+    """Return an SVG QR code for a same-origin URL.
 
-    The QR image itself contains no inventory data — it just encodes the URL
-    the caller supplies. ``requires_auth = False`` lets the card display it in
-    an ``<img>`` tag without needing to forward auth headers.
+    ``requires_auth = False`` lets the card display it in an ``<img>`` tag.
+    To prevent the endpoint being used as an open QR generator for arbitrary
+    external URLs (phishing), only same-origin absolute URLs and relative paths
+    are accepted.
     """
 
     url = "/api/stockpile/qr"
@@ -23,6 +25,13 @@ class StockpileQRView(HomeAssistantView):
         target_url = request.query.get("url", "").strip()
         if not target_url:
             return web.Response(status=400, text="url parameter required")
+
+        parsed = urlparse(target_url)
+        if parsed.scheme or parsed.netloc:
+            if parsed.scheme not in ("http", "https"):
+                return web.Response(status=400, text="invalid URL scheme")
+            if parsed.netloc != request.host:
+                return web.Response(status=400, text="cross-origin URLs not permitted")
 
         try:
             import qrcode  # noqa: PLC0415

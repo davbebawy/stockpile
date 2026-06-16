@@ -75,6 +75,8 @@ class StockpileCard extends HTMLElement {
     this._locationSvg = null;
     this._locationSvgId = null;
     this._pendingTmplId = null;
+    this._onKeydown = null;
+    this._mapGhost = null;
   }
 
   setConfig(config) {
@@ -185,6 +187,8 @@ class StockpileCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    if (this._onKeydown) document.removeEventListener("keydown", this._onKeydown);
+    if (this._mapGhost) { this._mapGhost.remove(); this._mapGhost = null; }
     if (this._unsub) {
       try { this._unsub(); } catch (e) { /* noop */ }
     }
@@ -220,12 +224,14 @@ class StockpileCard extends HTMLElement {
     this._addOverlay.addEventListener("click", (e) => {
       if (e.target === this._addOverlay) this._closeAdd();
     });
-    document.addEventListener("keydown", (e) => {
+    if (this._onKeydown) document.removeEventListener("keydown", this._onKeydown);
+    this._onKeydown = (e) => {
       if (e.key === "Escape") {
         if (this._selected) this._closeDetail();
         if (this._addOpen) this._closeAdd();
       }
-    });
+    };
+    document.addEventListener("keydown", this._onKeydown);
   }
 
   // ------------------------------------------------------------------ //
@@ -874,7 +880,12 @@ class StockpileCard extends HTMLElement {
     for (let i = 13; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(d.getDate() - i);
-      dateKeys.push(d.toISOString().slice(0, 10));
+      // Local date string so sparkline columns align with the user's timezone,
+      // not UTC (which can shift the "today" bucket for non-UTC users).
+      const y = d.getFullYear();
+      const mo = String(d.getMonth() + 1).padStart(2, "0");
+      const dy = String(d.getDate()).padStart(2, "0");
+      dateKeys.push(`${y}-${mo}-${dy}`);
     }
 
     const maxVal = Math.max(
@@ -1202,10 +1213,11 @@ class StockpileCard extends HTMLElement {
       };
       ghost = tile.cloneNode(true);
       ghost.classList.add("map-ghost");
-      ghost.style.width = box.width + "px";
-      ghost.style.left = box.left + "px";
-      ghost.style.top = box.top + "px";
-      document.body.appendChild(ghost);
+      // Inline positional styles so Shadow DOM stylesheet can apply the rest.
+      // position:fixed inside Shadow DOM is viewport-relative (no transform on host).
+      ghost.style.cssText = `position:fixed;width:${box.width}px;left:${box.left}px;top:${box.top}px;`;
+      this._mapGhost = ghost;
+      this.shadowRoot.appendChild(ghost);
       tile.style.opacity = "0.25";
       tile.setPointerCapture && tile.setPointerCapture(e.pointerId);
       dragging.tile = tile;
@@ -1232,7 +1244,7 @@ class StockpileCard extends HTMLElement {
     const onUp = async (e) => {
       if (!dragging) return;
       if (dragging.tile) dragging.tile.style.opacity = "";
-      if (ghost) { ghost.remove(); ghost = null; }
+      if (ghost) { ghost.remove(); ghost = null; this._mapGhost = null; }
 
       if (this._mapDragMoved && canvas) {
         const canvasRect = canvas.getBoundingClientRect();
@@ -1387,14 +1399,12 @@ class StockpileCard extends HTMLElement {
     btn.disabled = true;
     btn.textContent = "Parsing…";
     try {
-      const result = await this._hass.connection.sendMessagePromise({
-        type: "call_service",
-        domain: "stockpile",
-        service: "parse_receipt",
-        service_data: { text },
-        return_response: true,
-      });
-      const suggestions = (result?.response?.suggestions) || [];
+      // hass.callService(domain, service, data, target, notifyOnError, returnResponse)
+      const result = await this._hass.callService(
+        "stockpile", "parse_receipt", { text },
+        undefined, false, true,
+      );
+      const suggestions = result?.response?.suggestions ?? result?.suggestions ?? [];
       this._rxSugg = suggestions;
       this._renderReceiptReview(suggestions);
     } catch (e) {

@@ -6,6 +6,7 @@ and the frontend card can react. Service calls that need to return data
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import timedelta
 
@@ -46,6 +47,7 @@ def _parse_receipt_text(text: str) -> list[dict]:
     out: list[dict] = []
     for raw in text.splitlines():
         line = raw.strip()
+        line = re.sub(r'[\x00-\x1f\x7f]', ' ', line).strip()
         if len(line) < 3:
             continue
         if any(w in line.lower() for w in _SKIP_WORDS):
@@ -194,7 +196,8 @@ SET_LOCATION_TEMPLATE_SCHEMA = vol.Schema(
     {
         vol.Required("location_id"): cv.string,
         vol.Optional("template_id"): vol.Any(None, cv.string),
-        vol.Optional("template_config"): vol.Any(None, cv.string),
+        # Accept dict (from YAML/scripts) or JSON string; handler normalises to str.
+        vol.Optional("template_config"): vol.Any(None, dict, cv.string),
     }
 )
 
@@ -523,10 +526,9 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def set_location_template(call: ServiceCall) -> None:
         db = get_db(hass)
-        import json as _json  # noqa: PLC0415
         config = call.data.get("template_config")
         if isinstance(config, dict):
-            config = _json.dumps(config)
+            config = json.dumps(config)
         await db.set_location_template(
             call.data["location_id"],
             call.data.get("template_id"),
