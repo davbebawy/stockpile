@@ -73,6 +73,36 @@ async def ws_velocity(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "stockpile/templates",
+        vol.Optional("location_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_templates(hass, connection, msg):
+    from .location_templates import get_template_list, render_for_location  # noqa: PLC0415
+
+    templates = get_template_list()
+    payload: dict = {"templates": templates}
+
+    location_id = msg.get("location_id")
+    if location_id:
+        loc = next(
+            (l for l in await _db(hass).get_locations() if l["id"] == location_id),
+            None,
+        )
+        if loc and loc.get("template_id"):
+            try:
+                svg = render_for_location(loc["template_id"], loc.get("template_config"))
+                payload["location_svg"] = svg
+                payload["location_template_id"] = loc["template_id"]
+            except ValueError:
+                pass
+
+    connection.send_result(msg["id"], payload)
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "stockpile/trends",
         vol.Optional("days", default=14): int,
     }
@@ -107,4 +137,5 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_history)
     websocket_api.async_register_command(hass, ws_velocity)
     websocket_api.async_register_command(hass, ws_trends)
+    websocket_api.async_register_command(hass, ws_templates)
     websocket_api.async_register_command(hass, ws_subscribe)

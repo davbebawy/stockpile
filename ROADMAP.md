@@ -66,7 +66,7 @@ Status legend: **Done** · **In progress** · **Planned**
 - **Done** — Pytest suite (17 tests, runs with `pytest`)
 - **Done** — `scripts/release.py` release helper: bumps version files, commits, tags, and creates a GitHub release in one step
 - **Planned** — Submit to the HACS default store
-- **Planned** — Free placement (true x/y grid) as an alternative to ordered layout
+- **Done** — Free x/y floor-plan placement: three schematic templates (chest freezer top-down, wire rack front-elevation, refrigerator front-elevation); drag packages onto the canvas; unpositioned packages in a staging tray; template config UI inline
 
 ---
 

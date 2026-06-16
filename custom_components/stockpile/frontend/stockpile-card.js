@@ -70,6 +70,11 @@ class StockpileCard extends HTMLElement {
     this._historyView = null;
     this._trends = null;
     this._deepLinkHandled = false;
+    this._gridMode = "grid";
+    this._templates = [];
+    this._locationSvg = null;
+    this._locationSvgId = null;
+    this._pendingTmplId = null;
   }
 
   setConfig(config) {
@@ -121,6 +126,12 @@ class StockpileCard extends HTMLElement {
       this._products = prods.products || [];
     } catch (e) {
       /* autocomplete just won't suggest */
+    }
+    try {
+      const tmplRes = await this._hass.connection.sendMessagePromise({ type: "stockpile/templates" });
+      this._templates = tmplRes.templates || [];
+    } catch (e) {
+      /* floor plan just won't show template picker */
     }
     await this._fetch();
     try {
@@ -382,6 +393,7 @@ class StockpileCard extends HTMLElement {
 
   // ----- grid view -------------------------------------------------- //
   _renderGrid() {
+    if (this._gridMode === "map") { this._renderMapMode(); return; }
     let pkgs = this._packages;
     let backBtn = "";
     if (this._productFilter) {
@@ -408,6 +420,7 @@ class StockpileCard extends HTMLElement {
                <button class="btn-primary" data-arrange="0">Done</button>`
             : `<button class="link" data-add="1">+ Add</button>
                <button class="link" data-receipt="1">Receipt</button>
+               <button class="link ${this._gridMode === "map" ? "on" : ""}" data-mapmode="1" title="Toggle floor-plan map">Map</button>
                <button class="link" data-arrange="1">Arrange</button>`
         }
       </div>`;
@@ -494,6 +507,13 @@ class StockpileCard extends HTMLElement {
     if (add) add.addEventListener("click", () => this._openAdd());
     const rcpt = this._body.querySelector("[data-receipt]");
     if (rcpt) rcpt.addEventListener("click", () => this._openReceipt());
+    const mapBtn = this._body.querySelector("[data-mapmode]");
+    if (mapBtn) mapBtn.addEventListener("click", () => {
+      this._gridMode = this._gridMode === "map" ? "grid" : "map";
+      this._locationSvg = null;
+      this._locationSvgId = null;
+      this._render();
+    });
   }
 
   // ----- pointer-based drag to arrange (touch-friendly) ------------- //
@@ -1044,6 +1064,293 @@ class StockpileCard extends HTMLElement {
     });
   }
 
+  // ----- floor plan (map mode) -------------------------------------- //
+  _renderMapMode() {
+    const controls = `
+      <div class="grid-bar">
+        <span class="spacer"></span>
+        <button class="link ${this._gridMode === "map" ? "on" : ""}" data-mapmode="1" title="Toggle floor-plan map">Map</button>
+        <button class="link" data-arrange="0" style="display:none"></button>
+      </div>`;
+
+    if (!this._locationFilter) {
+      this._body.innerHTML = controls + `
+        <div class="map-hint">
+          <div class="map-hint-icon">🗺</div>
+          <div>Select a <strong>location</strong> above to view its floor plan.</div>
+        </div>`;
+      this._wireGridBar();
+      return;
+    }
+
+    const loc = this._locations.find((l) => l.id === this._locationFilter);
+    if (!loc) { this._renderGrid(); return; }
+
+    if (!loc.template_id) {
+      this._body.innerHTML = controls + this._renderTemplateSetup(loc);
+      this._wireGridBar();
+      this._wireTemplateSetup(loc);
+      return;
+    }
+
+    // Need to load the SVG from the server if we don't have it cached
+    if (this._locationSvgId !== this._locationFilter || !this._locationSvg) {
+      this._body.innerHTML = controls + `<div class="empty">Loading map…</div>`;
+      this._wireGridBar();
+      this._hass.connection.sendMessagePromise({
+        type: "stockpile/templates",
+        location_id: this._locationFilter,
+      }).then((res) => {
+        this._locationSvg = res.location_svg || null;
+        this._locationSvgId = this._locationFilter;
+        this._renderMapMode();
+      }).catch(() => {
+        this._body.innerHTML = controls + `<div class="empty">Could not load floor plan.</div>`;
+      });
+      return;
+    }
+
+    const pkgs = this._packages;
+    const placed = pkgs.filter((p) => p.loc_x != null && p.loc_y != null);
+    const staged = pkgs.filter((p) => p.loc_x == null || p.loc_y == null);
+
+    // Derive aspect ratio from the template viewBox
+    const tmpl = this._templates.find((t) => t.id === loc.template_id);
+    const vb = tmpl ? tmpl.viewBox.split(" ") : ["0","0","200","130"];
+    const canvasW = parseFloat(vb[2]) || 200;
+    const canvasH = parseFloat(vb[3]) || 130;
+    const aspect = canvasW / canvasH;
+
+    const placedTiles = placed.map((p) => {
+      const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
+      const pct = Math.round(p.remaining);
+      const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
+      const initial = p.image ? "" : `<span class="ini">${this._esc((p.product_name||"?")[0].toUpperCase())}</span>`;
+      return `
+        <div class="map-tile ${p.status}" data-id="${p.id}"
+             style="left:${p.loc_x}%;top:${p.loc_y}%"
+             tabindex="0" role="button"
+             aria-label="${this._esc(p.product_name)}, ${pct}%">
+          <div class="map-tile-thumb" ${img}>
+            ${initial}
+            <div class="map-level" style="width:${pct}%;background:${color}"></div>
+          </div>
+          <div class="map-tile-pct" style="color:${color}">${pct}%</div>
+        </div>`;
+    }).join("");
+
+    const stagedTiles = staged.map((p) => {
+      const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
+      const pct = Math.round(p.remaining);
+      const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
+      const initial = p.image ? "" : `<span class="ini">${this._esc((p.product_name||"?")[0].toUpperCase())}</span>`;
+      return `
+        <div class="map-tile staged ${p.status}" data-id="${p.id}"
+             tabindex="0" role="button"
+             aria-label="${this._esc(p.product_name)}, ${pct}% (unpositioned)">
+          <div class="map-tile-thumb" ${img}>
+            ${initial}
+            <div class="map-level" style="width:${pct}%;background:${color}"></div>
+          </div>
+          <div class="map-tile-pct" style="color:${color}">${pct}%</div>
+        </div>`;
+    }).join("");
+
+    this._body.innerHTML = `
+      ${controls}
+      <div class="map-canvas" style="aspect-ratio:${aspect.toFixed(4)}">
+        <div class="map-bg">${this._locationSvg}</div>
+        ${placedTiles}
+      </div>
+      ${staged.length ? `
+        <div class="map-tray">
+          <div class="map-tray-label">Drag onto the map to position</div>
+          <div class="map-tray-items">${stagedTiles}</div>
+        </div>` : ""}
+    `;
+
+    this._wireGridBar();
+
+    const canvas = this._body.querySelector(".map-canvas");
+    const tray = this._body.querySelector(".map-tray-items");
+
+    // Click to open detail sheet
+    [canvas, tray].forEach((el) => el && el.addEventListener("click", (e) => {
+      const t = e.target.closest(".map-tile");
+      if (t && !this._mapDragMoved) this._openDetail(t.dataset.id);
+    }));
+
+    this._wireMapDrag(canvas, tray);
+  }
+
+  _wireMapDrag(canvas, tray) {
+    let dragging = null;
+    let ghost = null;
+    this._mapDragMoved = false;
+
+    const DRAG_THRESHOLD = 6;
+
+    const startDrag = (tile, e) => {
+      e.preventDefault();
+      this._mapDragMoved = false;
+      const box = tile.getBoundingClientRect();
+      dragging = {
+        id: tile.dataset.id,
+        fromTray: tile.classList.contains("staged"),
+        startX: e.clientX,
+        startY: e.clientY,
+      };
+      ghost = tile.cloneNode(true);
+      ghost.classList.add("map-ghost");
+      ghost.style.width = box.width + "px";
+      ghost.style.left = box.left + "px";
+      ghost.style.top = box.top + "px";
+      document.body.appendChild(ghost);
+      tile.style.opacity = "0.25";
+      tile.setPointerCapture && tile.setPointerCapture(e.pointerId);
+      dragging.tile = tile;
+    };
+
+    const onDown = (e) => {
+      const t = e.target.closest(".map-tile");
+      if (!t) return;
+      startDrag(t, e);
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - dragging.startX;
+      const dy = e.clientY - dragging.startY;
+      if (!this._mapDragMoved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      this._mapDragMoved = true;
+      if (ghost) {
+        ghost.style.left = (parseFloat(ghost.style.left) + e.movementX) + "px";
+        ghost.style.top = (parseFloat(ghost.style.top) + e.movementY) + "px";
+      }
+    };
+
+    const onUp = async (e) => {
+      if (!dragging) return;
+      if (dragging.tile) dragging.tile.style.opacity = "";
+      if (ghost) { ghost.remove(); ghost = null; }
+
+      if (this._mapDragMoved && canvas) {
+        const canvasRect = canvas.getBoundingClientRect();
+        const overCanvas = (
+          e.clientX >= canvasRect.left && e.clientX <= canvasRect.right &&
+          e.clientY >= canvasRect.top  && e.clientY <= canvasRect.bottom
+        );
+
+        const id = dragging.id;
+        if (overCanvas) {
+          const loc_x = Math.max(2, Math.min(98, ((e.clientX - canvasRect.left) / canvasRect.width) * 100));
+          const loc_y = Math.max(2, Math.min(98, ((e.clientY - canvasRect.top) / canvasRect.height) * 100));
+          await this._persistMapPosition(id, loc_x, loc_y);
+        } else if (!dragging.fromTray) {
+          // Dragged off canvas → unstage
+          await this._persistMapPosition(id, null, null);
+        }
+      }
+      dragging = null;
+    };
+
+    if (canvas) {
+      canvas.addEventListener("pointerdown", onDown);
+      canvas.addEventListener("pointermove", onMove);
+      canvas.addEventListener("pointerup", onUp);
+      canvas.addEventListener("pointercancel", onUp);
+    }
+    if (tray) {
+      tray.addEventListener("pointerdown", onDown);
+      tray.addEventListener("pointermove", onMove);
+      tray.addEventListener("pointerup", onUp);
+      tray.addEventListener("pointercancel", onUp);
+    }
+  }
+
+  async _persistMapPosition(id, locX, locY) {
+    try {
+      const payload = { package_id: id };
+      if (locX != null) { payload.loc_x = locX; payload.loc_y = locY; }
+      await this._hass.callService("stockpile", "set_package_position", payload);
+      await this._fetch();
+    } catch (e) {
+      console.error("stockpile: map position failed", e);
+    }
+  }
+
+  _renderTemplateSetup(loc) {
+    const thumbs = this._templates.map((t) => `
+      <button class="tmpl-thumb ${this._pendingTmplId === t.id ? "on" : ""}" data-tmpl="${t.id}">
+        <div class="tmpl-svg">${t.default_svg}</div>
+        <div class="tmpl-label">${this._esc(t.label)}</div>
+      </button>`).join("");
+
+    const pending = this._templates.find((t) => t.id === this._pendingTmplId);
+    const configFields = pending
+      ? pending.config_schema.map((f) => {
+          const inputEl = f.type === "bool"
+            ? `<label class="tmpl-bool">
+                 <input type="checkbox" data-cfg="${f.key}" ${f.default ? "checked" : ""} />
+                 ${this._esc(f.label)}
+               </label>`
+            : `<label class="tmpl-field">
+                 ${this._esc(f.label)}
+                 <input type="number" data-cfg="${f.key}"
+                        min="${f.min}" max="${f.max}" value="${f.default}" />
+               </label>`;
+          return inputEl;
+        }).join("")
+      : "";
+
+    return `
+      <div class="tmpl-setup">
+        <div class="tmpl-setup-title">Set up floor plan for <strong>${this._esc(loc.name)}</strong></div>
+        <div class="tmpl-thumbs">${thumbs}</div>
+        ${pending ? `
+          <div class="tmpl-config">${configFields}</div>
+          <div class="tmpl-apply-row">
+            <button class="btn-primary" data-apply-tmpl="1">Apply template</button>
+          </div>` : ""}
+      </div>`;
+  }
+
+  _wireTemplateSetup(loc) {
+    this._body.querySelectorAll("[data-tmpl]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._pendingTmplId = b.dataset.tmpl;
+        this._render();
+      })
+    );
+    const applyBtn = this._body.querySelector("[data-apply-tmpl]");
+    if (applyBtn) applyBtn.addEventListener("click", () => this._applyTemplate(loc.id));
+  }
+
+  async _applyTemplate(locationId) {
+    const tmpl = this._templates.find((t) => t.id === this._pendingTmplId);
+    if (!tmpl) return;
+    const config = {};
+    this._body.querySelectorAll("[data-cfg]").forEach((el) => {
+      const key = el.dataset.cfg;
+      config[key] = el.type === "checkbox" ? el.checked : Number(el.value);
+    });
+    try {
+      await this._hass.callService("stockpile", "set_location_template", {
+        location_id: locationId,
+        template_id: this._pendingTmplId,
+        template_config: JSON.stringify(config),
+      });
+      this._pendingTmplId = null;
+      this._locationSvg = null;
+      this._locationSvgId = null;
+      const locs = await this._hass.connection.sendMessagePromise({ type: "stockpile/locations" });
+      this._locations = locs.locations || [];
+      this._render();
+    } catch (e) {
+      console.error("stockpile: set_location_template failed", e);
+    }
+  }
+
   // ----- receipt overlay -------------------------------------------- //
   _openReceipt() {
     let ov = this.shadowRoot.querySelector(".rx-overlay");
@@ -1443,6 +1750,7 @@ class StockpileCard extends HTMLElement {
       }
       .link:hover { background: var(--sp-surface); }
       .link:focus-visible { outline: 2px solid var(--sp-primary); outline-offset: 2px; }
+      .link.on { color: var(--sp-primary); background: color-mix(in srgb, var(--sp-primary) 10%, transparent); }
       .cols { font-size: .82rem; color: var(--sp-fg-dim); min-width: 3ch; text-align: center; }
       .btn-primary {
         font: inherit;
@@ -1886,6 +2194,195 @@ class StockpileCard extends HTMLElement {
         justify-content: flex-end;
         padding: 6px 0 0;
       }
+
+      /* Floor plan / map mode */
+      .map-hint {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 40px 20px;
+        color: var(--sp-fg-dim);
+        text-align: center;
+        font-size: .9rem;
+      }
+      .map-hint-icon { font-size: 2.4rem; }
+
+      .map-canvas {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+        border-radius: var(--sp-radius-md);
+        border: 1px solid var(--sp-divider);
+        background: var(--sp-surface);
+      }
+      .map-bg {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        color: var(--sp-fg-dim);
+      }
+      .map-bg svg { width: 100%; height: 100%; display: block; }
+
+      .map-tile {
+        position: absolute;
+        width: 58px;
+        transform: translate(-50%, -50%);
+        cursor: pointer;
+        border-radius: var(--sp-radius-sm);
+        overflow: hidden;
+        background: var(--sp-surface-2);
+        border: 1px solid var(--sp-divider);
+        box-shadow: var(--sp-elevation);
+        transition: transform .12s ease, box-shadow .12s ease;
+        z-index: 2;
+        user-select: none;
+      }
+      .map-tile:hover { transform: translate(-50%,-50%) scale(1.08); box-shadow: var(--sp-elevation-strong); }
+      .map-tile:focus-visible { outline: 2px solid var(--sp-primary); outline-offset: 2px; }
+      .map-tile.staged { position: static; transform: none; flex: 0 0 58px; }
+      .map-tile.staged:hover { transform: scale(1.05); }
+      .map-tile-thumb {
+        width: 100%;
+        aspect-ratio: 1/1;
+        background-size: cover;
+        background-position: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        background-color: var(--card-background-color);
+      }
+      .map-level {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 4px;
+      }
+      .map-tile-pct {
+        font-size: .7rem;
+        font-weight: 700;
+        text-align: center;
+        padding: 2px 0;
+        line-height: 1;
+      }
+      .map-ghost {
+        position: fixed;
+        width: 58px !important;
+        z-index: 9999;
+        opacity: .85;
+        pointer-events: none;
+        border-radius: var(--sp-radius-sm);
+        overflow: hidden;
+        background: var(--sp-surface-2);
+        border: 2px solid var(--sp-primary);
+        box-shadow: var(--sp-elevation-strong);
+      }
+
+      .map-tray {
+        margin-top: 12px;
+        border-top: 1px dashed var(--sp-divider);
+        padding-top: 10px;
+      }
+      .map-tray-label {
+        font-size: .7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        color: var(--sp-fg-dim);
+        margin-bottom: 8px;
+      }
+      .map-tray-items {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      /* Template setup */
+      .tmpl-setup {
+        padding: 4px 0;
+      }
+      .tmpl-setup-title {
+        font-size: .9rem;
+        color: var(--sp-fg-dim);
+        margin-bottom: 14px;
+      }
+      .tmpl-thumbs {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .tmpl-thumb {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        padding: 10px 12px;
+        border: 2px solid var(--sp-divider);
+        border-radius: var(--sp-radius-md);
+        background: var(--sp-surface);
+        cursor: pointer;
+        font: inherit;
+        color: var(--sp-fg);
+        transition: border-color .15s ease;
+        width: 100px;
+      }
+      .tmpl-thumb:hover { border-color: var(--sp-primary); }
+      .tmpl-thumb.on { border-color: var(--sp-primary); background: color-mix(in srgb, var(--sp-primary) 8%, transparent); }
+      .tmpl-svg {
+        width: 70px;
+        height: 54px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--sp-fg-dim);
+      }
+      .tmpl-svg svg { max-width: 70px; max-height: 54px; }
+      .tmpl-label { font-size: .7rem; font-weight: 600; text-align: center; color: var(--sp-fg-dim); }
+      .tmpl-config {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .tmpl-field {
+        display: grid;
+        gap: 4px;
+        font-size: .76rem;
+        font-weight: 600;
+        color: var(--sp-fg-dim);
+        text-transform: uppercase;
+        letter-spacing: .04em;
+      }
+      .tmpl-field input {
+        font: inherit;
+        font-size: .9rem;
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+        color: var(--sp-fg);
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-sm);
+        padding: 7px 10px;
+        width: 70px;
+        outline: none;
+      }
+      .tmpl-field input:focus { border-color: var(--sp-primary); }
+      .tmpl-bool {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: .88rem;
+        font-weight: 600;
+        color: var(--sp-fg);
+        cursor: pointer;
+        align-self: flex-end;
+        padding-bottom: 8px;
+      }
+      .tmpl-bool input { width: 18px; height: 18px; accent-color: var(--sp-primary); }
+      .tmpl-apply-row { display: flex; justify-content: flex-end; }
 
       /* Receipt overlay */
       .rx-overlay {

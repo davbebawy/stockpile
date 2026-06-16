@@ -112,6 +112,17 @@ class InventoryDB:
                 "UPDATE packages SET position = rowid WHERE position IS NULL"
             )
             await self._db.commit()
+        if "loc_x" not in names:
+            await self._db.execute("ALTER TABLE packages ADD COLUMN loc_x REAL")
+            await self._db.execute("ALTER TABLE packages ADD COLUMN loc_y REAL")
+            await self._db.commit()
+
+        loc_cols = await self._query("PRAGMA table_info(locations)")
+        loc_names = {c["name"] for c in loc_cols}
+        if "template_id" not in loc_names:
+            await self._db.execute("ALTER TABLE locations ADD COLUMN template_id TEXT")
+            await self._db.execute("ALTER TABLE locations ADD COLUMN template_config TEXT")
+            await self._db.commit()
 
     async def async_close(self) -> None:
         if self._db is not None:
@@ -264,7 +275,8 @@ class InventoryDB:
         sql = """
             SELECT
                 pk.id, pk.product_id, pk.remaining, pk.quantity,
-                pk.location_id, pk.position, pk.added, pk.frozen, pk.expires, pk.notes,
+                pk.location_id, pk.position, pk.loc_x, pk.loc_y,
+                pk.added, pk.frozen, pk.expires, pk.notes,
                 pr.name AS product_name, pr.brand, pr.unit,
                 pr.category, pr.image, pr.threshold,
                 loc.name AS location_name
@@ -544,6 +556,29 @@ class InventoryDB:
         suggestions.sort(key=lambda x: (x["days_left"] if x["days_left"] is not None else 999, x["name"]))
         return suggestions
 
+    async def set_package_position(
+        self,
+        package_id: str,
+        loc_x: float | None,
+        loc_y: float | None,
+    ) -> dict[str, Any] | None:
+        await self._write(
+            "UPDATE packages SET loc_x = ?, loc_y = ? WHERE id = ?",
+            (loc_x, loc_y, package_id),
+        )
+        return await self.get_package(package_id)
+
+    async def set_location_template(
+        self,
+        location_id: str,
+        template_id: str | None,
+        template_config: str | None,
+    ) -> None:
+        await self._write(
+            "UPDATE locations SET template_id = ?, template_config = ? WHERE id = ?",
+            (template_id, template_config, location_id),
+        )
+
     async def count_packages(self) -> int:
         row = await self._query_one("SELECT COUNT(*) AS c FROM packages")
         return int(row["c"]) if row else 0
@@ -594,14 +629,16 @@ class InventoryDB:
     # ------------------------------------------------------------------ #
     async def export_all(self) -> dict[str, Any]:
         """Dump the full DB as a JSON-serializable dict."""
-        locations = await self._query("SELECT * FROM locations")
+        locations = await self._query(
+            "SELECT id, name, parent, template_id, template_config FROM locations"
+        )
         products = [
             {**p, "aliases": json.loads(p["aliases"] or "[]")}
             for p in await self._query("SELECT * FROM products")
         ]
         packages = await self._query(
             "SELECT id, product_id, remaining, quantity, location_id, position, "
-            "added, frozen, expires, notes FROM packages"
+            "loc_x, loc_y, added, frozen, expires, notes FROM packages"
         )
         log = await self._query("SELECT * FROM consumption_log")
         return {
@@ -632,8 +669,11 @@ class InventoryDB:
 
             for loc in payload.get("locations", []):
                 await self._db.execute(
-                    "INSERT OR REPLACE INTO locations (id, name, parent) VALUES (?, ?, ?)",
-                    (loc["id"], loc["name"], loc.get("parent")),
+                    "INSERT OR REPLACE INTO locations "
+                    "(id, name, parent, template_id, template_config) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (loc["id"], loc["name"], loc.get("parent"),
+                     loc.get("template_id"), loc.get("template_config")),
                 )
                 counts["locations"] += 1
 
@@ -660,12 +700,14 @@ class InventoryDB:
             for pk in payload.get("packages", []):
                 await self._db.execute(
                     "INSERT OR REPLACE INTO packages "
-                    "(id, product_id, remaining, quantity, location_id, position, added, frozen, expires, notes) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, product_id, remaining, quantity, location_id, position, "
+                    "loc_x, loc_y, added, frozen, expires, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         pk["id"], pk["product_id"], pk.get("remaining", 100.0),
                         pk.get("quantity", 1.0), pk.get("location_id"),
-                        pk.get("position"), pk.get("added") or _now(),
+                        pk.get("position"), pk.get("loc_x"), pk.get("loc_y"),
+                        pk.get("added") or _now(),
                         pk.get("frozen"), pk.get("expires"), pk.get("notes"),
                     ),
                 )

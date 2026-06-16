@@ -264,6 +264,55 @@ push_to_todo:
       selector:
         boolean:
 
+set_package_position:
+  name: Set package floor-plan position
+  description: >
+    Pin a package to a specific x/y coordinate on its location's floor-plan
+    canvas. Omit loc_x and loc_y (or pass null) to move the package back to
+    the unpositioned tray.
+  fields:
+    package_id:
+      required: true
+      selector:
+        text:
+    loc_x:
+      description: Horizontal position as a percentage (0–100) of the canvas width.
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.1
+          mode: box
+    loc_y:
+      description: Vertical position as a percentage (0–100) of the canvas height.
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.1
+          mode: box
+
+set_location_template:
+  name: Set location floor-plan template
+  description: >
+    Assign a schematic floor-plan template to a location and store its
+    configuration (number of shelves, baskets, etc.). Available template IDs:
+    chest_freezer, wire_rack, refrigerator. Pass null for template_id to
+    remove the template.
+  fields:
+    location_id:
+      required: true
+      selector:
+        text:
+    template_id:
+      description: Template ID — chest_freezer, wire_rack, or refrigerator.
+      selector:
+        text:
+    template_config:
+      description: JSON string with template-specific config keys (e.g. '{"shelves":5}').
+      selector:
+        text:
+
 parse_receipt:
   name: Parse receipt
   description: >

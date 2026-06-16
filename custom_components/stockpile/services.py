@@ -95,6 +95,8 @@ SERVICES = [
     "push_to_todo",
     "suggest_restock",
     "parse_receipt",
+    "set_package_position",
+    "set_location_template",
 ]
 
 GET_SUMMARY_SCHEMA = vol.Schema({})
@@ -180,6 +182,21 @@ SNOOZE_SCHEMA = vol.Schema(
 ACKNOWLEDGE_SCHEMA = vol.Schema({vol.Required("product_id"): cv.string})
 
 PARSE_RECEIPT_SCHEMA = vol.Schema({vol.Required("text"): cv.string})
+
+SET_PACKAGE_POSITION_SCHEMA = vol.Schema(
+    {
+        vol.Required("package_id"): cv.string,
+        vol.Optional("loc_x"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("loc_y"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+SET_LOCATION_TEMPLATE_SCHEMA = vol.Schema(
+    {
+        vol.Required("location_id"): cv.string,
+        vol.Optional("template_id"): vol.Any(None, cv.string),
+        vol.Optional("template_config"): vol.Any(None, cv.string),
+    }
+)
 
 SUGGEST_RESTOCK_SCHEMA = vol.Schema(
     {
@@ -489,6 +506,37 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN, "parse_receipt", parse_receipt, PARSE_RECEIPT_SCHEMA, SupportsResponse.ONLY
+    )
+
+    async def set_package_position(call: ServiceCall) -> ServiceResponse:
+        db = get_db(hass)
+        loc_x = call.data.get("loc_x")
+        loc_y = call.data.get("loc_y")
+        pkg = await db.set_package_position(call.data["package_id"], loc_x, loc_y)
+        notify()
+        return {"package": pkg}
+
+    hass.services.async_register(
+        DOMAIN, "set_package_position", set_package_position,
+        SET_PACKAGE_POSITION_SCHEMA, SupportsResponse.OPTIONAL,
+    )
+
+    async def set_location_template(call: ServiceCall) -> None:
+        db = get_db(hass)
+        import json as _json  # noqa: PLC0415
+        config = call.data.get("template_config")
+        if isinstance(config, dict):
+            config = _json.dumps(config)
+        await db.set_location_template(
+            call.data["location_id"],
+            call.data.get("template_id"),
+            config,
+        )
+        notify()
+
+    hass.services.async_register(
+        DOMAIN, "set_location_template", set_location_template,
+        SET_LOCATION_TEMPLATE_SCHEMA,
     )
 
 
