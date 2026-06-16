@@ -50,7 +50,8 @@ def _parse_receipt_text(text: str) -> list[dict]:
         line = re.sub(r'[\x00-\x1f\x7f]', ' ', line).strip()
         if len(line) < 3:
             continue
-        if any(w in line.lower() for w in _SKIP_WORDS):
+        ll = line.lower()
+        if any(re.search(r'\b' + re.escape(w) + r'\b', ll) for w in _SKIP_WORDS):
             continue
         line = _PRICE_RE.sub('', line).strip()
         if not line:
@@ -402,16 +403,19 @@ def async_register_services(hass: HomeAssistant) -> None:
         limit = call.data["limit"]
         low = await db.get_low_stock() if kind in ("all", "low") else []
         expiring = await db.get_expiring_soon() if kind in ("all", "expiring") else []
-        low_lines = [
-            f"{r['name']}{f' ({r['brand']})' if r.get('brand') else ''}"
-            f" — {r['package_count']} pkg, {round(r['equiv_remaining'], 2)} left"
-            for r in low[:limit]
-        ]
-        exp_lines = [
-            f"{r['product_name']}{f' ({r['brand']})' if r.get('brand') else ''}"
-            f" — {('expired ' + str(abs(r['expires_in_days'])) + 'd ago') if r['expired'] else ('expires in ' + str(r['expires_in_days']) + 'd')}"
-            for r in expiring[:limit]
-        ]
+        low_lines = []
+        for r in low[:limit]:
+            brand = f" ({r['brand']})" if r.get("brand") else ""
+            low_lines.append(
+                f"{r['name']}{brand}"
+                f" — {r['package_count']} pkg, {round(r['equiv_remaining'], 2)} left"
+            )
+        exp_lines = []
+        for r in expiring[:limit]:
+            brand = f" ({r['brand']})" if r.get("brand") else ""
+            days = r["expires_in_days"]
+            exp_str = f"expired {abs(days)}d ago" if r["expired"] else f"expires in {days}d"
+            exp_lines.append(f"{r['product_name']}{brand} — {exp_str}")
         parts: list[str] = []
         if low_lines:
             parts.append("Low stock:\n  " + "\n  ".join(low_lines))

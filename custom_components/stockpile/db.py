@@ -307,8 +307,31 @@ class InventoryDB:
         return rows
 
     async def get_package(self, package_id: str) -> dict[str, Any] | None:
-        rows = await self.get_packages()
-        return next((r for r in rows if r["id"] == package_id), None)
+        sql = """
+            SELECT
+                pk.id, pk.product_id, pk.remaining, pk.quantity,
+                pk.location_id, pk.position, pk.loc_x, pk.loc_y,
+                pk.added, pk.frozen, pk.expires, pk.notes,
+                pr.name AS product_name, pr.brand, pr.unit,
+                pr.category, pr.image, pr.threshold,
+                loc.name AS location_name
+            FROM packages pk
+            JOIN products pr ON pr.id = pk.product_id
+            LEFT JOIN locations loc ON loc.id = pk.location_id
+            WHERE pk.id = ?
+        """
+        rows = await self._query(sql, (package_id,))
+        if not rows:
+            return None
+        r = rows[0]
+        now = dt_util.utcnow()
+        r["status"] = _status(r["remaining"])
+        r["expires_in_days"] = _days_until(r.get("expires"), now)
+        r["expiring_soon"] = (
+            r["expires_in_days"] is not None and 0 <= r["expires_in_days"] <= EXPIRING_SOON_DAYS
+        )
+        r["expired"] = r["expires_in_days"] is not None and r["expires_in_days"] < 0
+        return r
 
     async def set_remaining(self, package_id: str, remaining: float, who: str | None = None) -> dict[str, Any] | None:
         remaining = max(0.0, min(100.0, remaining))
@@ -383,7 +406,7 @@ class InventoryDB:
                 (r["position"] if r["position"] is not None else float(r["rowid"]))
                 for r in rows
             )
-            for slot, pid in zip(slots, ids):
+            for pid, slot in zip(ids, slots):
                 await self._db.execute(
                     "UPDATE packages SET position = ? WHERE id = ?", (slot, pid)
                 )
@@ -555,6 +578,8 @@ class InventoryDB:
 
         suggestions: list[dict[str, Any]] = []
         for pid, row in summary.items():
+            if row.get("snoozed"):
+                continue
             equiv = float(row["equiv_remaining"])
             vel = velocities.get(pid)
             per_day = vel["per_day"] if vel else 0.0
@@ -676,6 +701,7 @@ class InventoryDB:
             "loc_x, loc_y, added, frozen, expires, notes FROM packages"
         )
         log = await self._query("SELECT * FROM consumption_log")
+        product_state = await self._query("SELECT * FROM product_state")
         return {
             "version": 1,
             "exported_at": _now(),
@@ -683,6 +709,7 @@ class InventoryDB:
             "products": products,
             "packages": packages,
             "consumption_log": log,
+            "product_state": product_state,
         }
 
     async def import_all(self, payload: dict[str, Any], *, replace: bool = False) -> dict[str, int]:
@@ -702,7 +729,7 @@ class InventoryDB:
             counts = {"locations": 0, "products": 0, "packages": 0, "log": 0}
             try:
                 if replace:
-                    for tbl in ("consumption_log", "packages", "products", "locations"):
+                    for tbl in ("consumption_log", "packages", "products", "locations", "product_state"):
                         await self._db.execute(f"DELETE FROM {tbl}")
 
                 for loc in payload.get("locations", []):
@@ -763,6 +790,15 @@ class InventoryDB:
                         ),
                     )
                     counts["log"] += 1
+
+                counts["product_state"] = 0
+                for ps in payload.get("product_state", []):
+                    await self._db.execute(
+                        "INSERT OR REPLACE INTO product_state "
+                        "(product_id, snoozed_until, acknowledged_at) VALUES (?, ?, ?)",
+                        (ps["product_id"], ps.get("snoozed_until"), ps.get("acknowledged_at")),
+                    )
+                    counts["product_state"] += 1
 
                 await self._db.execute("RELEASE sp_import")
                 await self._db.commit()

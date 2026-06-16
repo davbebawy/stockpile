@@ -78,6 +78,11 @@ class StockpileCard extends HTMLElement {
     this._onKeydown = null;
     this._mapGhost = null;
     this._locDetailOpen = false;
+    this._fpLocId = null;
+    this._fpSvg = null;
+    this._fpPackages = null;
+    this._fpOpen = false;
+    this._fpGhost = null;
   }
 
   setConfig(config) {
@@ -162,6 +167,13 @@ class StockpileCard extends HTMLElement {
       else if (this._view === "trends") await this._loadTrends();
       this._render();
       if (this._selected) this._refreshDetail();
+      if (this._fpOpen && this._fpLocId) {
+        try {
+          const fpRes = await this._hass.connection.sendMessagePromise({ type: "stockpile/packages", location_id: this._fpLocId });
+          this._fpPackages = fpRes.packages || [];
+          this._renderFloorPlan();
+        } catch (e) { /* noop */ }
+      }
       if (!this._deepLinkHandled) {
         const deepPkg = new URLSearchParams(window.location.search).get("stockpile");
         if (deepPkg && this._packages.find((p) => p.id === deepPkg)) {
@@ -190,6 +202,7 @@ class StockpileCard extends HTMLElement {
   disconnectedCallback() {
     if (this._onKeydown) document.removeEventListener("keydown", this._onKeydown);
     if (this._mapGhost) { this._mapGhost.remove(); this._mapGhost = null; }
+    if (this._fpGhost) { this._fpGhost.remove(); this._fpGhost = null; }
     if (this._unsub) {
       try { this._unsub(); } catch (e) { /* noop */ }
     }
@@ -214,6 +227,12 @@ class StockpileCard extends HTMLElement {
       <div class="overlay loc-overlay" role="dialog" aria-modal="true">
         <div class="sheet loc-sheet"></div>
       </div>
+      <div class="fp-overlay" role="dialog" aria-modal="true">
+        <div class="fp-popup">
+          <div class="fp-head"></div>
+          <div class="fp-body"></div>
+        </div>
+      </div>
     `;
     this._head = this.shadowRoot.querySelector(".head");
     this._body = this.shadowRoot.querySelector(".body");
@@ -223,6 +242,9 @@ class StockpileCard extends HTMLElement {
     this._addSheet = this._addOverlay.querySelector(".sheet");
     this._locOverlay = this.shadowRoot.querySelector(".loc-overlay");
     this._locSheet = this._locOverlay.querySelector(".loc-sheet");
+    this._fpOverlay = this.shadowRoot.querySelector(".fp-overlay");
+    this._fpPopupHead = this._fpOverlay.querySelector(".fp-head");
+    this._fpPopupBody = this._fpOverlay.querySelector(".fp-body");
 
     this._overlay.addEventListener("click", (e) => {
       if (e.target === this._overlay) this._closeDetail();
@@ -233,10 +255,14 @@ class StockpileCard extends HTMLElement {
     this._locOverlay.addEventListener("click", (e) => {
       if (e.target === this._locOverlay) this._closeLocDetail();
     });
+    this._fpOverlay.addEventListener("click", (e) => {
+      if (e.target === this._fpOverlay) this._closeFloorPlan();
+    });
     if (this._onKeydown) document.removeEventListener("keydown", this._onKeydown);
     this._onKeydown = (e) => {
       if (e.key === "Escape") {
-        if (this._locDetailOpen) this._closeLocDetail();
+        if (this._fpOpen) this._closeFloorPlan();
+        else if (this._locDetailOpen) this._closeLocDetail();
         else if (this._selected) this._closeDetail();
         else if (this._addOpen) this._closeAdd();
       }
@@ -442,7 +468,7 @@ class StockpileCard extends HTMLElement {
                <button class="btn-primary" data-arrange="0">Done</button>`
             : `<button class="link" data-add="1">+ Add</button>
                <button class="link" data-receipt="1">Receipt</button>
-               <button class="link ${this._gridMode === "map" ? "on" : ""}" data-mapmode="1" title="Toggle floor-plan map">Map</button>
+               <button class="link${this._locationFilter ? "" : " disabled"}" data-mapmode="1" title="${this._locationFilter ? "Open floor plan" : "Select a location to view floor plan"}">Map</button>
                <button class="link" data-arrange="1">Arrange</button>`
         }
       </div>`;
@@ -484,8 +510,7 @@ class StockpileCard extends HTMLElement {
   _tile(p, counts) {
     const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
     const pct = Math.round(p.remaining);
-    const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
-    const initial = p.image ? "" : `<span class="ini">${this._esc((p.product_name || "?")[0].toUpperCase())}</span>`;
+    const [tStyle, tContent] = this._tileVisual(p.product_name, p.category, p.image);
     const badge = counts[p.product_id] > 1 ? `<span class="count">${counts[p.product_id]}</span>` : "";
     const grip = this._arrange ? `<span class="grip" aria-hidden="true">⋮⋮</span>` : "";
     const expFlag = p.expired
@@ -496,8 +521,8 @@ class StockpileCard extends HTMLElement {
     return `
       <div class="tile ${p.status}${p.expired ? " expired" : ""}" data-id="${p.id}" ${this._arrange ? "" : 'tabindex="0" role="button"'}
            aria-label="${this._esc(p.product_name)}, ${pct}%${p.expired ? ", expired" : (p.expiring_soon ? ", expiring soon" : "")}">
-        <div class="thumb" ${img}>
-          ${initial}${badge}${grip}${expFlag}
+        <div class="thumb" style="${tStyle}">
+          ${tContent}${badge}${grip}${expFlag}
           <div class="level" style="width:${pct}%;background:${color}"></div>
         </div>
         <div class="meta">
@@ -510,8 +535,12 @@ class StockpileCard extends HTMLElement {
 
   _wireGridBar() {
     this._body.querySelectorAll("[data-arrange]").forEach((b) =>
-      b.addEventListener("click", () => {
+      b.addEventListener("click", async () => {
         this._arrange = b.dataset.arrange === "1";
+        if (!this._arrange) {
+          const grid = this._body.querySelector(".grid");
+          if (grid) await this._persistOrder(grid);
+        }
         this._render();
         if (!this._arrange) this._fetch();
       })
@@ -531,10 +560,9 @@ class StockpileCard extends HTMLElement {
     if (rcpt) rcpt.addEventListener("click", () => this._openReceipt());
     const mapBtn = this._body.querySelector("[data-mapmode]");
     if (mapBtn) mapBtn.addEventListener("click", () => {
-      this._gridMode = this._gridMode === "map" ? "grid" : "map";
-      this._locationSvg = null;
-      this._locationSvgId = null;
-      this._render();
+      if (this._locationFilter) {
+        this._openFloorPlan(this._locationFilter);
+      }
     });
   }
 
@@ -662,7 +690,15 @@ class StockpileCard extends HTMLElement {
       const p = products[h.product_id];
       const name = p ? p.name : h.product_id;
       const brand = p && p.brand ? p.brand : "";
-      const when = h.ts ? h.ts.replace("T", " ").slice(0, 16) : "";
+      let when = "";
+      if (h.ts) {
+        try {
+          const d = new Date(h.ts);
+          const y = d.getFullYear(), mo = String(d.getMonth()+1).padStart(2,"0"), dy = String(d.getDate()).padStart(2,"0");
+          const hh = String(d.getHours()).padStart(2,"0"), mm = String(d.getMinutes()).padStart(2,"0");
+          when = `${y}-${mo}-${dy} ${hh}:${mm}`;
+        } catch (e) { when = h.ts.slice(0, 16); }
+      }
       const amount = h.amount != null ? `${this._round(h.amount)}%` : "";
       const remaining = h.remaining_after != null ? `→ ${Math.round(h.remaining_after)}%` : "";
       const who = h.who ? ` · ${this._esc(h.who)}` : "";
@@ -732,8 +768,7 @@ class StockpileCard extends HTMLElement {
     if (!p) { this._closeDetail(); return; }
     const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
     const pct = Math.round(p.remaining);
-    const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
-    const initial = p.image ? "" : `<span class="ini big">${this._esc((p.product_name || "?")[0].toUpperCase())}</span>`;
+    const [imgStyle, imgContent] = this._tileVisual(p.product_name, p.category, p.image);
     const d = (s) => (s ? s.slice(0, 10) : "—");
     const expRow = p.expires
       ? `<dt>Expires</dt><dd>${d(p.expires)}${p.expires_in_days != null ? ` <span class="hint">(${this._esc(EXPIRING_LABEL(p.expires_in_days))})</span>` : ""}</dd>`
@@ -769,7 +804,7 @@ class StockpileCard extends HTMLElement {
     }
 
     this._sheet.innerHTML = `
-      <div class="d-thumb" ${img}>${initial}</div>
+      <div class="d-thumb" style="${imgStyle}">${imgContent.replace('class="ini"', 'class="ini big"').replace('class="ini-emoji"', 'class="ini-emoji big"')}</div>
       <h2>${this._esc(p.product_name)}</h2>
       <div class="d-brand">${this._esc(p.brand || "")}</div>
       <dl class="facts">
@@ -785,15 +820,16 @@ class StockpileCard extends HTMLElement {
         <button class="act" data-use="10">Use 10%</button>
         <button class="act" data-use="25">Use 25%</button>
         <button class="act" data-use="50">Use 50%</button>
-        <button class="act" data-use="100">Use all</button>
+        <button class="act" data-use="${pct}" title="Consume the remaining ${pct}%">Use all</button>
       </div>
       <div class="custom-row">
-        <input type="range" min="1" max="100" value="20" aria-label="Custom amount" />
-        <span class="val" aria-live="polite">20</span>
+        <input type="range" min="1" max="100" value="${pct}" aria-label="Custom amount" />
+        <span class="val" aria-live="polite">${pct}</span>
         <button class="apply">Use</button>
       </div>
       ${historyHtml}
       <div class="quiet-row">
+        <span class="snooze-label">For all ${this._esc(p.product_name)}:</span>
         <button class="link" data-snooze="24">Snooze 1d</button>
         <button class="link" data-snooze="168">Snooze 7d</button>
         <button class="link" data-ack="1">Acknowledge</button>
@@ -1151,15 +1187,14 @@ class StockpileCard extends HTMLElement {
     const placedTiles = placed.map((p) => {
       const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
       const pct = Math.round(p.remaining);
-      const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
-      const initial = p.image ? "" : `<span class="ini">${this._esc((p.product_name||"?")[0].toUpperCase())}</span>`;
+      const [tStyle, tContent] = this._tileVisual(p.product_name, p.category, p.image);
       return `
         <div class="map-tile ${p.status}" data-id="${p.id}"
              style="left:${p.loc_x}%;top:${p.loc_y}%"
              tabindex="0" role="button"
              aria-label="${this._esc(p.product_name)}, ${pct}%">
-          <div class="map-tile-thumb" ${img}>
-            ${initial}
+          <div class="map-tile-thumb" style="${tStyle}">
+            ${tContent}
             <div class="map-level" style="width:${pct}%;background:${color}"></div>
           </div>
           <div class="map-tile-pct" style="color:${color}">${pct}%</div>
@@ -1169,14 +1204,13 @@ class StockpileCard extends HTMLElement {
     const stagedTiles = staged.map((p) => {
       const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
       const pct = Math.round(p.remaining);
-      const img = p.image ? `style="background-image:url('${this._esc(p.image)}')"` : "";
-      const initial = p.image ? "" : `<span class="ini">${this._esc((p.product_name||"?")[0].toUpperCase())}</span>`;
+      const [tStyle, tContent] = this._tileVisual(p.product_name, p.category, p.image);
       return `
         <div class="map-tile staged ${p.status}" data-id="${p.id}"
              tabindex="0" role="button"
              aria-label="${this._esc(p.product_name)}, ${pct}% (unpositioned)">
-          <div class="map-tile-thumb" ${img}>
-            ${initial}
+          <div class="map-tile-thumb" style="${tStyle}">
+            ${tContent}
             <div class="map-level" style="width:${pct}%;background:${color}"></div>
           </div>
           <div class="map-tile-pct" style="color:${color}">${pct}%</div>
@@ -1300,7 +1334,14 @@ class StockpileCard extends HTMLElement {
     try {
       const payload = { package_id: id };
       if (locX != null) { payload.loc_x = locX; payload.loc_y = locY; }
+      else { payload.loc_x = null; payload.loc_y = null; }
       await this._hass.callService("stockpile", "set_package_position", payload);
+      // Refresh fp popup packages directly without full fetch to avoid flicker
+      if (this._fpOpen && this._fpLocId) {
+        const res = await this._hass.connection.sendMessagePromise({ type: "stockpile/packages", location_id: this._fpLocId });
+        this._fpPackages = res.packages || [];
+        this._renderFloorPlan();
+      }
       await this._fetch();
     } catch (e) {
       console.error("stockpile: map position failed", e);
@@ -1437,12 +1478,7 @@ class StockpileCard extends HTMLElement {
       const mapBtn = this._locSheet.querySelector("[data-open-map]");
       if (mapBtn) mapBtn.addEventListener("click", () => {
         this._closeLocDetail();
-        this._locationFilter = loc.id;
-        this._gridMode = "map";
-        this._locationSvg = null;
-        this._locationSvgId = null;
-        this._view = "grid";
-        this._fetch().then(() => this._render());
+        this._openFloorPlan(loc.id);
       });
       const reconfigBtn = this._locSheet.querySelector("[data-reconfig-tmpl]");
       if (reconfigBtn) reconfigBtn.addEventListener("click", () => {
@@ -1493,6 +1529,177 @@ class StockpileCard extends HTMLElement {
     } catch (e) {
       console.error("stockpile: set_location_template failed", e);
     }
+  }
+
+  // ----- floor plan popup ------------------------------------------- //
+  async _openFloorPlan(locId) {
+    const loc = this._locations.find((l) => l.id === locId);
+    if (!loc) return;
+    if (!loc.template_id) { this._openLocationDetail(locId); return; }
+    this._fpLocId = locId;
+    this._fpSvg = null;
+    this._fpPackages = null;
+    this._fpOpen = true;
+    this._renderFloorPlan();
+    this._fpOverlay.classList.add("open");
+    try {
+      const [pkgRes, tmplRes] = await Promise.all([
+        this._hass.connection.sendMessagePromise({ type: "stockpile/packages", location_id: locId }),
+        this._hass.connection.sendMessagePromise({ type: "stockpile/templates", location_id: locId }),
+      ]);
+      this._fpPackages = pkgRes.packages || [];
+      this._fpSvg = tmplRes.location_svg || null;
+      if (this._fpOpen) this._renderFloorPlan();
+    } catch (e) { console.error("stockpile: floor plan load failed", e); }
+  }
+
+  _closeFloorPlan() {
+    this._fpOpen = false;
+    this._fpLocId = null;
+    this._fpSvg = null;
+    this._fpPackages = null;
+    if (this._fpGhost) { this._fpGhost.remove(); this._fpGhost = null; }
+    this._fpOverlay.classList.remove("open");
+  }
+
+  _renderFloorPlan() {
+    if (!this._fpLocId) return;
+    const loc = this._locations.find((l) => l.id === this._fpLocId);
+    const locName = loc ? this._esc(loc.name) : "Floor Plan";
+
+    this._fpPopupHead.innerHTML = `
+      <div class="fp-title">${locName}</div>
+      <button class="fp-close" aria-label="Close floor plan">✕</button>`;
+    this._fpPopupHead.querySelector(".fp-close").addEventListener("click", () => this._closeFloorPlan());
+
+    if (!this._fpPackages || !this._fpSvg) {
+      this._fpPopupBody.innerHTML = `<div class="fp-loading">Loading floor plan…</div>`;
+      return;
+    }
+
+    const tmpl = this._templates.find((t) => loc && t.id === loc.template_id);
+    const vb = tmpl ? tmpl.viewBox.split(" ") : ["0","0","200","130"];
+    const canvasW = parseFloat(vb[2]) || 200;
+    const canvasH = parseFloat(vb[3]) || 130;
+    const aspect = canvasW / canvasH;
+
+    const pkgs = this._fpPackages;
+    const placed = pkgs.filter((p) => p.loc_x != null && p.loc_y != null);
+    const staged = pkgs.filter((p) => p.loc_x == null || p.loc_y == null);
+
+    const placedTiles = placed.map((p) => {
+      const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
+      const pct = Math.round(p.remaining);
+      const [tStyle, tContent] = this._tileVisual(p.product_name, p.category, p.image);
+      return `
+        <div class="map-tile fp-tile ${p.status}" data-id="${p.id}"
+             style="left:${p.loc_x}%;top:${p.loc_y}%"
+             tabindex="0" role="button"
+             aria-label="${this._esc(p.product_name)}, ${pct}%">
+          <div class="map-tile-thumb" style="${tStyle}">
+            ${tContent}
+            <div class="map-level" style="width:${pct}%;background:${color}"></div>
+          </div>
+          <div class="map-tile-name">${this._esc(p.product_name)}</div>
+          <div class="map-tile-pct" style="color:${color}">${pct}%</div>
+        </div>`;
+    }).join("");
+
+    const stagedTiles = staged.map((p) => {
+      const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
+      const pct = Math.round(p.remaining);
+      const [tStyle, tContent] = this._tileVisual(p.product_name, p.category, p.image);
+      return `
+        <div class="map-tile fp-tile staged ${p.status}" data-id="${p.id}"
+             tabindex="0" role="button"
+             aria-label="${this._esc(p.product_name)}, ${pct}% (unpositioned)">
+          <div class="map-tile-thumb" style="${tStyle}">
+            ${tContent}
+            <div class="map-level" style="width:${pct}%;background:${color}"></div>
+          </div>
+          <div class="map-tile-name">${this._esc(p.product_name)}</div>
+          <div class="map-tile-pct" style="color:${color}">${pct}%</div>
+        </div>`;
+    }).join("");
+
+    this._fpPopupBody.innerHTML = `
+      <div class="fp-canvas-wrap" style="aspect-ratio:${aspect.toFixed(4)}">
+        <div class="map-bg">${this._fpSvg}</div>
+        ${placedTiles}
+      </div>
+      ${staged.length ? `
+        <div class="fp-tray">
+          <div class="fp-tray-label">Not placed yet — drag onto the floor plan</div>
+          <div class="fp-tray-items">${stagedTiles}</div>
+        </div>` : ""}
+    `;
+
+    const canvas = this._fpPopupBody.querySelector(".fp-canvas-wrap");
+    const tray = this._fpPopupBody.querySelector(".fp-tray-items");
+
+    this._fpDragMoved = false;
+    [canvas, tray].forEach((el) => el && el.addEventListener("click", (e) => {
+      const t = e.target.closest(".map-tile");
+      if (t && !this._fpDragMoved) this._openDetail(t.dataset.id);
+    }));
+
+    this._wireFloorPlanDrag(canvas, tray);
+  }
+
+  _wireFloorPlanDrag(canvas, tray) {
+    let dragging = null;
+    let ghost = null;
+    this._fpDragMoved = false;
+    const THRESH = 6;
+
+    const startDrag = (tile, e) => {
+      e.preventDefault();
+      this._fpDragMoved = false;
+      const box = tile.getBoundingClientRect();
+      dragging = { id: tile.dataset.id, fromTray: tile.classList.contains("staged"), startX: e.clientX, startY: e.clientY, tile };
+      ghost = tile.cloneNode(true);
+      ghost.classList.add("map-ghost");
+      ghost.style.cssText = `position:fixed;width:${box.width}px;left:${box.left}px;top:${box.top}px;`;
+      this._fpGhost = ghost;
+      this.shadowRoot.appendChild(ghost);
+      tile.style.opacity = "0.25";
+      tile.setPointerCapture && tile.setPointerCapture(e.pointerId);
+    };
+
+    const onDown = (e) => { const t = e.target.closest(".map-tile"); if (t) startDrag(t, e); };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - dragging.startX, dy = e.clientY - dragging.startY;
+      if (!this._fpDragMoved && Math.hypot(dx, dy) < THRESH) return;
+      this._fpDragMoved = true;
+      if (ghost) { ghost.style.left = (parseFloat(ghost.style.left) + e.movementX) + "px"; ghost.style.top = (parseFloat(ghost.style.top) + e.movementY) + "px"; }
+    };
+
+    const onUp = async (e) => {
+      if (!dragging) return;
+      if (dragging.tile) dragging.tile.style.opacity = "";
+      if (ghost) { ghost.remove(); ghost = null; this._fpGhost = null; }
+      if (this._fpDragMoved && canvas) {
+        const r = canvas.getBoundingClientRect();
+        const over = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        if (over) {
+          const loc_x = Math.max(2, Math.min(98, ((e.clientX - r.left) / r.width) * 100));
+          const loc_y = Math.max(2, Math.min(98, ((e.clientY - r.top) / r.height) * 100));
+          await this._persistMapPosition(dragging.id, loc_x, loc_y);
+        } else if (!dragging.fromTray) {
+          await this._persistMapPosition(dragging.id, null, null);
+        }
+      }
+      dragging = null;
+    };
+
+    [canvas, tray].filter(Boolean).forEach((el) => {
+      el.addEventListener("pointerdown", onDown);
+      el.addEventListener("pointermove", onMove);
+      el.addEventListener("pointerup", onUp);
+      el.addEventListener("pointercancel", onUp);
+    });
   }
 
   // ----- receipt overlay -------------------------------------------- //
@@ -1668,6 +1875,69 @@ class StockpileCard extends HTMLElement {
   _round(n) { return Math.round(n * 10) / 10; }
   _esc(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  _nameHash(str) {
+    let h = 0;
+    for (const c of String(str || "")) h = (Math.imul(31, h) + c.charCodeAt(0)) | 0;
+    return Math.abs(h);
+  }
+
+  _tileGradient(name, category) {
+    const PALETTES = [
+      ["#667eea","#764ba2"],["#f093fb","#f5576c"],["#4facfe","#00f2fe"],
+      ["#43e97b","#38f9d7"],["#fa709a","#fee140"],["#a18cd1","#fbc2eb"],
+      ["#fccb90","#d57eeb"],["#a1c4fd","#c2e9fb"],["#fd7043","#ff8a65"],
+      ["#80cbc4","#4db6ac"],
+    ];
+    const CAT_BIAS = {
+      Meat:0, Seafood:2, Vegetables:3, Dairy:7,
+      "Dry Goods":6, Frozen:1, Household:8, Dessert:4,
+    };
+    let idx = this._nameHash(name) % PALETTES.length;
+    if (category && CAT_BIAS[category] !== undefined) {
+      idx = (CAT_BIAS[category] + (this._nameHash(name) % 3)) % PALETTES.length;
+    }
+    const [a, b] = PALETTES[idx];
+    return `linear-gradient(135deg,${a},${b})`;
+  }
+
+  _productEmoji(name, category) {
+    const CAT = { Meat:"🥩", Seafood:"🐟", Vegetables:"🥦", Dairy:"🧀",
+                  "Dry Goods":"🍝", Frozen:"🧊", Household:"🧴", Dessert:"🍨",
+                  Bakery:"🍞", Snacks:"🥨", Beverages:"☕" };
+    if (category && CAT[category]) return CAT[category];
+    const n = (name || "").toLowerCase();
+    if (/beef|chicken|pork|turkey|lamb|steak|brisket/.test(n)) return "🥩";
+    if (/salmon|fish|tuna|shrimp|seafood|halibut/.test(n)) return "🐟";
+    if (/pasta|noodle|rice|grain|tortilla|bread/.test(n)) return "🍝";
+    if (/milk|cheese|yogurt|butter|cream|dairy/.test(n)) return "🧀";
+    if (/ice cream|gelato|sorbet/.test(n)) return "🍨";
+    if (/soap|detergent|cleaner|dish|bleach/.test(n)) return "🧴";
+    if (/paper|towel|tissue|napkin/.test(n)) return "🧻";
+    if (/coffee|espresso/.test(n)) return "☕";
+    if (/tea/.test(n)) return "🍵";
+    if (/olive oil|oil|vinegar|sauce|salsa/.test(n)) return "🫙";
+    if (/pizza/.test(n)) return "🍕";
+    if (/apple|fruit|berry/.test(n)) return "🍎";
+    if (/pea|broccoli|spinach|veggie|vegetable|corn/.test(n)) return "🥦";
+    if (/egg/.test(n)) return "🥚";
+    if (/bacon|sausage|hot dog/.test(n)) return "🥓";
+    if (/chip|snack|popcorn|pretzel/.test(n)) return "🥨";
+    return null;
+  }
+
+  // Returns [styleString, innerHtml] for a tile thumbnail.
+  _tileVisual(name, category, image) {
+    if (image) {
+      return [`background-image:url('${this._esc(image)}')`, ""];
+    }
+    const emoji = this._productEmoji(name, category);
+    const gradient = this._tileGradient(name, category);
+    const content = emoji
+      ? `<span class="ini-emoji">${emoji}</span>`
+      : `<span class="ini">${this._esc((name || "?")[0].toUpperCase())}</span>`;
+    return [`background:${gradient}`, content];
   }
 
   _css() {
@@ -2798,6 +3068,157 @@ class StockpileCard extends HTMLElement {
       .loc-tmpl-svg svg { max-width: 54px; max-height: 42px; }
       .loc-tmpl-name { font-weight: 600; font-size: .92rem; color: var(--sp-fg); }
       .loc-tmpl-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+      /* Emoji / gradient tile placeholder */
+      .ini-emoji {
+        font-size: 1.9rem;
+        line-height: 1;
+        filter: drop-shadow(0 1px 2px rgba(0,0,0,.3));
+        user-select: none;
+      }
+      .ini-emoji.big {
+        font-size: 3.2rem;
+      }
+      .thumb { background-color: transparent; }
+
+      /* Snooze label */
+      .snooze-label {
+        font-size: .72rem;
+        color: var(--sp-fg-dim);
+        font-weight: 500;
+        align-self: center;
+        flex: 1 1 100%;
+        margin-bottom: 2px;
+      }
+
+      /* Disabled link button */
+      .link.disabled {
+        opacity: .38;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+
+      /* Floor plan popup */
+      .fp-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 14;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,.6);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        animation: sp-fade .15s ease;
+        padding: 16px;
+        box-sizing: border-box;
+      }
+      .fp-overlay.open { display: flex; }
+
+      .fp-popup {
+        width: min(920px, 100%);
+        height: min(760px, 100%);
+        background: var(--sp-surface-2);
+        border-radius: 20px;
+        box-shadow: var(--sp-elevation-strong);
+        animation: sp-pop .2s cubic-bezier(.2,.8,.2,1);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .fp-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px 14px;
+        border-bottom: 1px solid var(--sp-divider);
+        flex-shrink: 0;
+      }
+      .fp-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--sp-fg);
+        letter-spacing: -.01em;
+      }
+      .fp-close {
+        font: inherit;
+        font-size: 1rem;
+        cursor: pointer;
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-pill);
+        color: var(--sp-fg-dim);
+        padding: 5px 12px;
+        transition: background-color .15s ease;
+      }
+      .fp-close:hover { background: var(--sp-divider); }
+
+      .fp-body {
+        flex: 1;
+        overflow: auto;
+        padding: 16px 20px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .fp-loading {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--sp-fg-dim);
+        font-size: .9rem;
+      }
+
+      .fp-canvas-wrap {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+        border-radius: var(--sp-radius-md);
+        border: 1px solid var(--sp-divider);
+        background: var(--sp-surface);
+        flex-shrink: 0;
+      }
+
+      .fp-tile {
+        width: 72px !important;
+      }
+      .fp-tile .map-tile-name {
+        font-size: .62rem;
+        font-weight: 600;
+        text-align: center;
+        padding: 1px 2px 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--sp-fg);
+        line-height: 1.2;
+        max-width: 72px;
+      }
+      .fp-tile:hover { transform: translate(-50%,-50%) scale(1.1) !important; }
+      .fp-tile.staged { transform: none !important; flex: 0 0 72px !important; }
+      .fp-tile.staged:hover { transform: scale(1.06) !important; }
+
+      .fp-tray {
+        border-top: 1px dashed var(--sp-divider);
+        padding-top: 10px;
+        flex-shrink: 0;
+      }
+      .fp-tray-label {
+        font-size: .7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        color: var(--sp-fg-dim);
+        margin-bottom: 8px;
+      }
+      .fp-tray-items {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
 
       @media (prefers-reduced-motion: reduce) {
         .tile, .level, .r-bar span, .overlay, .sheet { transition: none; animation: none; }
