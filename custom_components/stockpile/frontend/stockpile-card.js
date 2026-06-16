@@ -3650,6 +3650,75 @@ class StockpileCard extends HTMLElement {
         gap: 8px;
       }
 
+      /* stockpile-map-card preview */
+      .mp-card {
+        cursor: pointer;
+        border-radius: var(--sp-radius-md);
+        overflow: hidden;
+        border: 1px solid var(--sp-divider);
+        background: var(--sp-surface);
+        transition: transform .14s cubic-bezier(.2,.7,.2,1), box-shadow .14s ease, border-color .14s ease;
+      }
+      .mp-card:hover, .mp-card:focus-visible {
+        transform: translateY(-2px);
+        box-shadow: var(--sp-elevation);
+        outline: none;
+        border-color: var(--sp-primary);
+      }
+      .mp-canvas {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+      }
+      .mp-bg { position: absolute; inset: 0; pointer-events: none; color: var(--sp-fg-dim); }
+      .mp-bg svg { width: 100%; height: 100%; display: block; }
+      .mp-dot {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 1px 4px rgba(0,0,0,.45);
+        z-index: 2;
+        transition: transform .1s ease;
+      }
+      .mp-dot:hover { transform: translate(-50%,-50%) scale(1.6); }
+      .mp-open-hint {
+        position: absolute;
+        bottom: 8px;
+        right: 10px;
+        font-size: .7rem;
+        font-weight: 700;
+        letter-spacing: .02em;
+        color: rgba(255,255,255,.9);
+        text-shadow: 0 1px 4px rgba(0,0,0,.7);
+        pointer-events: none;
+      }
+      .mp-footer {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        background: var(--sp-surface);
+        border-top: 1px solid var(--sp-divider);
+      }
+      .mp-count { font-size: .78rem; font-weight: 600; color: var(--sp-fg); }
+      .mp-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 36px 16px;
+        text-align: center;
+      }
+      .mp-empty-icon { font-size: 2.4rem; }
+      .mp-empty-text { font-size: .84rem; color: var(--sp-fg-dim); line-height: 1.5; }
+      .mp-loading {
+        padding: 32px 16px;
+        text-align: center;
+        color: var(--sp-fg-dim);
+        font-size: .84rem;
+      }
+
       @media (prefers-reduced-motion: reduce) {
         .tile, .level, .r-bar span, .overlay, .sheet { transition: none; animation: none; }
       }
@@ -3663,6 +3732,117 @@ class StockpileSummaryCard extends StockpileCard {
   }
   static getConfigElement() {
     return document.createElement("stockpile-summary-card-editor");
+  }
+}
+
+// ---------------------------------------------------------------------- //
+// Standalone floor-plan preview card
+// ---------------------------------------------------------------------- //
+class StockpileMapCard extends StockpileCard {
+  setConfig(config) {
+    if (!config.location_id) throw new Error("stockpile-map-card requires location_id");
+    super.setConfig(config);
+  }
+
+  connectedCallback() {
+    this._handleOpenEvent = (e) => {
+      if (e.detail?.location_id === this._locationFilter) {
+        this._openFloorPlan(this._locationFilter);
+      }
+    };
+    window.addEventListener("stockpile:open-floorplan", this._handleOpenEvent);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._handleOpenEvent) {
+      window.removeEventListener("stockpile:open-floorplan", this._handleOpenEvent);
+    }
+  }
+
+  getCardSize() { return 4; }
+  getLayoutOptions() { return { grid_columns: 2, grid_min_columns: 1, grid_rows: "auto" }; }
+
+  static getStubConfig() { return { title: "Freezer", location_id: "" }; }
+  static getConfigElement() { return document.createElement("stockpile-map-card-editor"); }
+
+  _render() {
+    this._renderHead();
+    this._renderMapPreview();
+  }
+
+  _renderHead() {
+    const loc = this._locations.find((l) => l.id === this._locationFilter);
+    const title = this._config.title || (loc ? loc.name : "Floor Plan");
+    this._head.innerHTML = `<div class="head-row"><div class="title">${this._esc(title)}</div></div>`;
+  }
+
+  _renderMapPreview() {
+    const loc = this._locations.find((l) => l.id === this._locationFilter);
+
+    if (!loc || !loc.template_id) {
+      this._body.innerHTML = `
+        <div class="mp-empty">
+          <div class="mp-empty-icon">🗺</div>
+          <div class="mp-empty-text">No floor plan configured for this location.</div>
+          <button class="link" data-mp-setup="1">Set up floor plan →</button>
+        </div>`;
+      const btn = this._body.querySelector("[data-mp-setup]");
+      if (btn) btn.addEventListener("click", () => this._openLocationDetail(this._locationFilter));
+      return;
+    }
+
+    if (this._locationSvgId !== this._locationFilter || !this._locationSvg) {
+      this._body.innerHTML = `<div class="mp-loading">Loading floor plan…</div>`;
+      this._hass.connection.sendMessagePromise({
+        type: "stockpile/templates",
+        location_id: this._locationFilter,
+      }).then((res) => {
+        this._locationSvg = res.location_svg || null;
+        this._locationSvgId = this._locationFilter;
+        this._renderMapPreview();
+      }).catch(() => {
+        this._body.innerHTML = `<div class="mp-loading">Could not load floor plan.</div>`;
+      });
+      return;
+    }
+
+    const pkgs = this._packages;
+    const placed = pkgs.filter((p) => p.loc_x != null && p.loc_y != null);
+    const staged = pkgs.filter((p) => p.loc_x == null || p.loc_y == null);
+
+    const tmpl = this._templates.find((t) => loc && t.id === loc.template_id);
+    const vb = tmpl ? tmpl.viewBox.split(" ") : ["0","0","200","130"];
+    const aspect = (parseFloat(vb[2]) || 200) / (parseFloat(vb[3]) || 130);
+
+    const dots = placed.map((p) => {
+      const color = STATUS_VAR[p.status] || STATUS_VAR.medium;
+      const pct = Math.round(p.remaining);
+      return `<div class="mp-dot ${p.status}" style="left:${p.loc_x}%;top:${p.loc_y}%;background:${color}" title="${this._esc(p.product_name)} · ${pct}%"></div>`;
+    }).join("");
+
+    const countText = placed.length
+      ? `${placed.length} item${placed.length !== 1 ? "s" : ""}${staged.length ? ` · ${staged.length} unplaced` : ""}`
+      : (pkgs.length ? `${pkgs.length} item${pkgs.length !== 1 ? "s" : ""} — tap to place on map` : "No items in this location");
+
+    this._body.innerHTML = `
+      <div class="mp-card" role="button" tabindex="0" aria-label="Open floor plan for ${this._esc(loc.name)}">
+        <div class="mp-canvas" style="aspect-ratio:${aspect.toFixed(4)}">
+          <div class="mp-bg">${this._locationSvg}</div>
+          ${dots}
+          <div class="mp-open-hint">View Floor Plan ›</div>
+        </div>
+        <div class="mp-footer">
+          <span class="mp-count">${this._esc(countText)}</span>
+        </div>
+      </div>`;
+
+    const card = this._body.querySelector(".mp-card");
+    const open = () => this._openFloorPlan(this._locationFilter);
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
   }
 }
 
@@ -3791,11 +3971,58 @@ class StockpileCardEditor extends StockpileCardEditorBase {
 class StockpileSummaryCardEditor extends StockpileCardEditorBase {
   _typeName() { return "stockpile-summary-card"; }
 }
+class StockpileMapCardEditor extends StockpileCardEditorBase {
+  _typeName() { return "stockpile-map-card"; }
+
+  _render() {
+    const c = this._config;
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: block; font-family: var(--ha-font-family-body, "Roboto", sans-serif); }
+        .ed { display: grid; gap: 12px; }
+        label { display: grid; gap: 4px; font-size: .78rem; font-weight: 600;
+                color: var(--secondary-text-color); text-transform: uppercase; letter-spacing: .04em; }
+        input, select {
+          font: inherit; font-size: .95rem; font-weight: 400; text-transform: none; letter-spacing: normal;
+          color: var(--primary-text-color); background: var(--secondary-background-color);
+          border: 1px solid var(--divider-color, rgba(127,127,127,.18));
+          border-radius: 10px; padding: 9px 10px; outline: none;
+        }
+        input:focus, select:focus {
+          border-color: var(--primary-color);
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 25%, transparent);
+        }
+        .hint { font-size: .78rem; color: var(--secondary-text-color); font-weight: 400;
+                text-transform: none; letter-spacing: normal; }
+      </style>
+      <div class="ed">
+        <label>Title
+          <input data-key="title" type="text" value="${this._esc(c.title || "")}" placeholder="Freezer Top" />
+          <span class="hint">Shown on the card. Defaults to the location name.</span>
+        </label>
+        <label>Location
+          <select data-key="location_id">
+            <option value="">— select a location —</option>
+            ${this._locations.map((l) =>
+              `<option value="${l.id}" ${c.location_id === l.id ? "selected" : ""}>${this._esc(l.name)}</option>`
+            ).join("")}
+          </select>
+        </label>
+      </div>`;
+
+    this.shadowRoot.querySelectorAll("[data-key]").forEach((el) => {
+      el.addEventListener("change", () => this._emit({ [el.dataset.key]: el.value }));
+      if (el.type === "text") el.addEventListener("input", () => this._emit({ [el.dataset.key]: el.value }));
+    });
+  }
+}
 
 customElements.define("stockpile-card", StockpileCard);
 customElements.define("stockpile-summary-card", StockpileSummaryCard);
+customElements.define("stockpile-map-card", StockpileMapCard);
 customElements.define("stockpile-card-editor", StockpileCardEditor);
 customElements.define("stockpile-summary-card-editor", StockpileSummaryCardEditor);
+customElements.define("stockpile-map-card-editor", StockpileMapCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push(
@@ -3810,6 +4037,13 @@ window.customCards.push(
     type: "stockpile-card",
     name: "Stockpile Grid",
     description: "Visual package grid with quick consume actions and drag-to-arrange.",
+    preview: false,
+    documentationURL: "https://github.com/davbebawwy/stockpile",
+  },
+  {
+    type: "stockpile-map-card",
+    name: "Stockpile Floor Plan",
+    description: "Live floor plan preview for one location. Tap to open the full interactive map.",
     preview: false,
     documentationURL: "https://github.com/davbebawwy/stockpile",
   }
