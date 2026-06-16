@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS product_state (
     acknowledged_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS off_cache (
+    key        TEXT PRIMARY KEY,  -- normalized query (lowercase name) or barcode
+    query      TEXT,              -- original search term
+    results    TEXT,              -- JSON array of normalized product objects
+    fetched_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_packages_product  ON packages(product_id);
 CREATE INDEX IF NOT EXISTS idx_packages_location ON packages(location_id);
 CREATE INDEX IF NOT EXISTS idx_log_product       ON consumption_log(product_id);
@@ -807,6 +814,75 @@ class InventoryDB:
                 await self._db.execute("RELEASE sp_import")
                 raise
             return counts
+
+    # ------------------------------------------------------------------ #
+    # product metadata helpers
+    # ------------------------------------------------------------------ #
+    async def update_product_metadata(
+        self,
+        product_id: str,
+        *,
+        image: str | None = None,
+        category: str | None = None,
+    ) -> None:
+        """Fill in missing image / category for an existing product (never overwrites)."""
+        parts: list[str] = []
+        params: list = []
+        if image is not None:
+            parts.append("image = COALESCE(NULLIF(image,''), ?)")
+            params.append(image)
+        if category is not None:
+            parts.append("category = COALESCE(NULLIF(category,''), ?)")
+            params.append(category)
+        if not parts:
+            return
+        params.append(product_id)
+        await self._write(
+            f"UPDATE products SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Open Food Facts cache
+    # ------------------------------------------------------------------ #
+    async def get_off_cache(self, key: str) -> dict[str, Any] | None:
+        return await self._query_one(
+            "SELECT * FROM off_cache WHERE key = ?", (key.lower().strip(),)
+        )
+
+    async def upsert_off_cache(self, key: str, query: str, results_json: str) -> None:
+        await self._write(
+            """INSERT INTO off_cache (key, query, results, fetched_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 query = excluded.query,
+                 results = excluded.results,
+                 fetched_at = excluded.fetched_at""",
+            (key.lower().strip(), query, results_json, _now()),
+        )
+
+    async def list_off_cache(self) -> list[dict[str, Any]]:
+        rows = await self._query(
+            "SELECT key, query, results, fetched_at FROM off_cache ORDER BY fetched_at DESC"
+        )
+        for r in rows:
+            try:
+                r["result_count"] = len(json.loads(r.get("results") or "[]"))
+            except Exception:
+                r["result_count"] = 0
+            r.pop("results", None)
+        return rows
+
+    async def delete_off_cache(self, key: str) -> None:
+        await self._write(
+            "DELETE FROM off_cache WHERE key = ?", (key.lower().strip(),)
+        )
+
+    async def clear_off_cache(self) -> int:
+        row = await self._query_one("SELECT COUNT(*) AS c FROM off_cache")
+        count = int(row["c"]) if row else 0
+        await self._write("DELETE FROM off_cache")
+        return count
 
     # ------------------------------------------------------------------ #
     # demo / test data

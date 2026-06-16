@@ -1039,14 +1039,33 @@ class StockpileCard extends HTMLElement {
       .map((p) => `<option value="${this._esc(p.name)}"></option>`)
       .join("");
 
+    const CATEGORIES = ["Meat","Seafood","Vegetables","Dairy","Dry Goods","Bakery","Frozen","Dessert","Beverages","Snacks","Household"];
+    const catOptions = CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join("");
+
     this._addSheet.innerHTML = `
       <h2>Add package</h2>
       <form class="add-form" autocomplete="off">
         <label>Name
-          <input name="name" type="text" required placeholder="e.g. Ground Beef" list="stockpile-products" />
+          <div class="name-row">
+            <input name="name" type="text" required placeholder="e.g. Ground Beef" list="stockpile-products" />
+            <button type="button" class="btn-lookup" data-lookup="1" title="Search Open Food Facts">🔍</button>
+          </div>
           <datalist id="stockpile-products">${productOptions}</datalist>
           <span class="hint" data-suggest hidden></span>
         </label>
+        <div class="off-panel" hidden>
+          <div class="off-panel-head">
+            <span class="off-panel-label">Open Food Facts</span>
+            <span class="off-cached" hidden>Cached</span>
+            <button type="button" class="off-dismiss">✕</button>
+          </div>
+          <div class="off-results-list"></div>
+        </div>
+        <label class="img-label" hidden>Image URL
+          <input name="image" type="url" placeholder="https://…" />
+          <div class="img-preview" hidden></div>
+        </label>
+        <input name="category" type="hidden" />
         <label>Brand
           <input name="brand" type="text" placeholder="optional" />
         </label>
@@ -1067,6 +1086,8 @@ class StockpileCard extends HTMLElement {
           <input name="expires" type="date" />
         </label>
         <div class="close-row">
+          <button type="button" class="link add-cache-link" data-open-cache="1">Product cache ›</button>
+          <span class="spacer"></span>
           <button type="button" class="close">Cancel</button>
           <button type="submit" class="btn-primary">Add</button>
         </div>
@@ -1078,6 +1099,11 @@ class StockpileCard extends HTMLElement {
     const brandInput = form.querySelector("input[name=brand]");
     const unitInput = form.querySelector("input[name=unit]");
     const suggestHint = form.querySelector("[data-suggest]");
+    const offPanel = form.querySelector(".off-panel");
+    const imgLabel = form.querySelector(".img-label");
+    const imgInput = form.querySelector("input[name=image]");
+    const imgPreview = form.querySelector(".img-preview");
+    const catInput = form.querySelector("input[name=category]");
 
     const tryMatch = () => {
       const v = (nameInput.value || "").trim().toLowerCase();
@@ -1099,6 +1125,28 @@ class StockpileCard extends HTMLElement {
     nameInput.addEventListener("change", tryMatch);
     nameInput.addEventListener("input", tryMatch);
 
+    imgInput.addEventListener("input", () => {
+      const url = imgInput.value.trim();
+      if (url) {
+        imgPreview.hidden = false;
+        imgPreview.innerHTML = `<img src="${this._esc(url)}" alt="preview" onerror="this.parentNode.hidden=true" />`;
+      } else {
+        imgPreview.hidden = true;
+      }
+    });
+
+    form.querySelector("[data-lookup]").addEventListener("click", () => {
+      const q = nameInput.value.trim();
+      if (!q) { nameInput.focus(); return; }
+      this._offLookup(q, form);
+    });
+    form.querySelector(".off-dismiss").addEventListener("click", () => {
+      offPanel.hidden = true;
+    });
+    form.querySelector("[data-open-cache]").addEventListener("click", () => {
+      this._openCacheManager();
+    });
+
     this._addSheet.querySelector(".close").addEventListener("click", () => this._closeAdd());
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -1109,6 +1157,8 @@ class StockpileCard extends HTMLElement {
         name,
         brand: (data.get("brand") || "").toString().trim() || undefined,
         unit: (data.get("unit") || "").toString().trim() || undefined,
+        image: (data.get("image") || "").toString().trim() || undefined,
+        category: (data.get("category") || "").toString().trim() || undefined,
         location_id: (data.get("location_id") || "").toString() || undefined,
         remaining: Number(data.get("remaining") || 100),
         quantity: Number(data.get("quantity") || 1),
@@ -1125,6 +1175,152 @@ class StockpileCard extends HTMLElement {
         box.textContent = `Could not add: ${String(err.message || err)}`;
       }
     });
+  }
+
+  async _offLookup(query, form) {
+    const btn = form.querySelector("[data-lookup]");
+    const offPanel = form.querySelector(".off-panel");
+    const resultsList = form.querySelector(".off-results-list");
+    const cachedBadge = form.querySelector(".off-cached");
+
+    btn.textContent = "⏳";
+    btn.disabled = true;
+    offPanel.hidden = false;
+    resultsList.innerHTML = `<div class="off-loading">Searching Open Food Facts…</div>`;
+    cachedBadge.hidden = true;
+
+    try {
+      const res = await this._hass.connection.sendMessagePromise({
+        type: "stockpile/search_product",
+        query,
+      });
+      const results = res.results || [];
+      cachedBadge.hidden = !res.cached;
+
+      if (!results.length) {
+        resultsList.innerHTML = `<div class="off-empty">No results found. Try a different name or add details manually.</div>`;
+      } else {
+        resultsList.innerHTML = results.map((r, i) => {
+          const img = r.image_url
+            ? `<img class="off-r-img" src="${this._esc(r.image_url)}" alt="" loading="lazy" />`
+            : `<div class="off-r-img off-r-noimg">${this._productEmoji(r.name, r.category) || "?"}</div>`;
+          const sub = [r.brand, r.quantity_str, r.category].filter(Boolean).join(" · ");
+          const labels = (r.labels || []).map((l) => `<span class="off-label">${this._esc(l)}</span>`).join("");
+          const ns = r.nutriscore ? `<span class="off-ns off-ns-${r.nutriscore.toLowerCase()}">${r.nutriscore.toUpperCase()}</span>` : "";
+          return `
+            <button type="button" class="off-result" data-off-i="${i}">
+              ${img}
+              <div class="off-r-info">
+                <div class="off-r-name">${this._esc(r.name)}</div>
+                <div class="off-r-sub">${this._esc(sub)}</div>
+                ${labels || ns ? `<div class="off-r-tags">${labels}${ns}</div>` : ""}
+              </div>
+              <div class="off-r-check" aria-hidden="true">›</div>
+            </button>`;
+        }).join("");
+
+        resultsList.querySelectorAll("[data-off-i]").forEach((b) => {
+          b.addEventListener("click", () => {
+            const r = results[Number(b.dataset.offI)];
+            this._applyOffResult(r, form);
+            offPanel.hidden = true;
+          });
+        });
+      }
+    } catch (err) {
+      resultsList.innerHTML = `<div class="off-empty">Could not reach Open Food Facts: ${this._esc(String(err.message || err))}</div>`;
+    } finally {
+      btn.textContent = "🔍";
+      btn.disabled = false;
+    }
+  }
+
+  _applyOffResult(r, form) {
+    const nameInput = form.querySelector("input[name=name]");
+    const brandInput = form.querySelector("input[name=brand]");
+    const unitInput = form.querySelector("input[name=unit]");
+    const imgInput = form.querySelector("input[name=image]");
+    const imgLabel = form.querySelector(".img-label");
+    const imgPreview = form.querySelector(".img-preview");
+    const catInput = form.querySelector("input[name=category]");
+    const suggestHint = form.querySelector("[data-suggest]");
+
+    if (r.name && !nameInput.value) nameInput.value = r.name;
+    if (r.brand) brandInput.value = r.brand;
+    if (r.unit) unitInput.value = r.unit;
+    if (r.category) catInput.value = r.category;
+    if (r.image_url) {
+      imgInput.value = r.image_url;
+      imgLabel.hidden = false;
+      imgPreview.hidden = false;
+      imgPreview.innerHTML = `<img src="${this._esc(r.image_url)}" alt="product" />`;
+    }
+    suggestHint.hidden = false;
+    const sub = [r.brand, r.quantity_str, r.category].filter(Boolean).join(" · ");
+    suggestHint.textContent = `From Open Food Facts${sub ? " · " + sub : ""}`;
+
+    // Trigger catalog match check
+    nameInput.dispatchEvent(new Event("change"));
+  }
+
+  // ----- cache manager ------------------------------------------------ //
+  _openCacheManager() {
+    this._addSheet.innerHTML = `
+      <div class="cache-mgr">
+        <div class="cache-mgr-head">
+          <button class="link" data-back="1">← Back</button>
+          <h2>Product cache</h2>
+        </div>
+        <div class="cache-list" data-cache-list>
+          <div class="off-loading">Loading…</div>
+        </div>
+        <div class="cache-mgr-foot">
+          <button class="act danger" data-clear-all="1">Clear all</button>
+        </div>
+      </div>`;
+
+    this._addSheet.querySelector("[data-back]").addEventListener("click", () => this._renderAdd());
+    this._addSheet.querySelector("[data-clear-all]").addEventListener("click", async () => {
+      try {
+        await this._hass.callService("stockpile", "clear_product_cache", {});
+        this._openCacheManager();
+      } catch (e) { console.error("stockpile: clear cache failed", e); }
+    });
+    this._loadCacheList();
+  }
+
+  async _loadCacheList() {
+    const listEl = this._addSheet.querySelector("[data-cache-list]");
+    if (!listEl) return;
+    try {
+      const res = await this._hass.connection.sendMessagePromise({ type: "stockpile/off_cache" });
+      const entries = res.entries || [];
+      if (!entries.length) {
+        listEl.innerHTML = `<div class="cache-empty">No cached lookups yet. Search Open Food Facts from the Add form.</div>`;
+        return;
+      }
+      listEl.innerHTML = entries.map((e) => `
+        <div class="cache-entry">
+          <div class="cache-entry-info">
+            <div class="cache-entry-query">${this._esc(e.query || e.key)}</div>
+            <div class="cache-entry-meta">${e.result_count} result${e.result_count !== 1 ? "s" : ""} · ${(e.fetched_at || "").slice(0, 10)}</div>
+          </div>
+          <button class="cache-del" data-key="${this._esc(e.key)}" title="Remove from cache" aria-label="Remove ${this._esc(e.query || e.key)} from cache">✕</button>
+        </div>`).join("");
+      listEl.querySelectorAll("[data-key]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          try {
+            await this._hass.callService("stockpile", "clear_product_cache", { key: b.dataset.key });
+            b.closest(".cache-entry").remove();
+            if (!listEl.querySelector(".cache-entry")) {
+              listEl.innerHTML = `<div class="cache-empty">Cache is now empty.</div>`;
+            }
+          } catch (e) { console.error("stockpile: cache delete failed", e); }
+        })
+      );
+    } catch (err) {
+      listEl.innerHTML = `<div class="cache-empty">Could not load cache.</div>`;
+    }
   }
 
   // ----- floor plan (map mode) -------------------------------------- //
@@ -3068,6 +3264,240 @@ class StockpileCard extends HTMLElement {
       .loc-tmpl-svg svg { max-width: 54px; max-height: 42px; }
       .loc-tmpl-name { font-weight: 600; font-size: .92rem; color: var(--sp-fg); }
       .loc-tmpl-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+      /* Add form — name row with lookup button */
+      .name-row {
+        display: flex;
+        gap: 6px;
+      }
+      .name-row input { flex: 1; }
+      .btn-lookup {
+        font: inherit;
+        font-size: 1rem;
+        cursor: pointer;
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-sm);
+        color: var(--sp-fg);
+        padding: 0 10px;
+        min-height: 40px;
+        transition: background-color .15s ease;
+      }
+      .btn-lookup:hover { background: var(--sp-primary); color: #fff; border-color: var(--sp-primary); }
+      .btn-lookup:disabled { opacity: .5; cursor: not-allowed; }
+
+      .add-cache-link { font-size: .76rem; color: var(--sp-fg-dim); }
+      .add-cache-link:hover { color: var(--sp-primary); }
+
+      /* Image preview */
+      .img-preview { margin-top: 6px; }
+      .img-preview img {
+        width: 100%;
+        max-height: 120px;
+        object-fit: contain;
+        border-radius: var(--sp-radius-sm);
+        background: var(--sp-surface);
+        border: 1px solid var(--sp-divider);
+      }
+
+      /* OFF results panel */
+      .off-panel {
+        border: 1px solid var(--sp-divider);
+        border-radius: var(--sp-radius-md);
+        overflow: hidden;
+        margin-top: -4px;
+      }
+      .off-panel-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: var(--sp-surface);
+        border-bottom: 1px solid var(--sp-divider);
+      }
+      .off-panel-label {
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--sp-fg-dim);
+        flex: 1;
+      }
+      .off-cached {
+        font-size: .65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        padding: 2px 7px;
+        border-radius: var(--sp-radius-pill);
+        background: color-mix(in srgb, var(--sp-primary) 15%, transparent);
+        color: var(--sp-primary);
+        border: 1px solid var(--sp-primary);
+      }
+      .off-dismiss {
+        font: inherit;
+        font-size: .8rem;
+        cursor: pointer;
+        background: none;
+        border: none;
+        color: var(--sp-fg-dim);
+        padding: 2px 4px;
+      }
+      .off-dismiss:hover { color: var(--sp-fg); }
+      .off-results-list { max-height: 240px; overflow-y: auto; }
+      .off-loading, .off-empty {
+        padding: 14px 12px;
+        font-size: .82rem;
+        color: var(--sp-fg-dim);
+        text-align: center;
+        line-height: 1.5;
+      }
+      .off-result {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+        background: none;
+        border: none;
+        border-bottom: 1px solid var(--sp-divider);
+        padding: 9px 12px;
+        transition: background-color .12s ease;
+      }
+      .off-result:last-child { border-bottom: none; }
+      .off-result:hover { background: var(--sp-surface); }
+      .off-r-img {
+        width: 44px;
+        height: 44px;
+        flex-shrink: 0;
+        object-fit: contain;
+        border-radius: var(--sp-radius-sm);
+        background: #fff;
+        border: 1px solid var(--sp-divider);
+      }
+      .off-r-noimg {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.4rem;
+        background: var(--sp-surface);
+      }
+      .off-r-info { flex: 1; min-width: 0; }
+      .off-r-name {
+        font-size: .88rem;
+        font-weight: 600;
+        color: var(--sp-fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .off-r-sub {
+        font-size: .74rem;
+        color: var(--sp-fg-dim);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .off-r-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+        margin-top: 3px;
+      }
+      .off-label {
+        font-size: .62rem;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: var(--sp-radius-pill);
+        background: var(--sp-surface);
+        color: var(--sp-fg-dim);
+        border: 1px solid var(--sp-divider);
+      }
+      .off-ns {
+        font-size: .65rem;
+        font-weight: 800;
+        padding: 1px 5px;
+        border-radius: 4px;
+        color: #fff;
+        text-transform: uppercase;
+      }
+      .off-ns-a { background: #1a9c3e; }
+      .off-ns-b { background: #56c430; }
+      .off-ns-c { background: #f7c31c; color: #333; }
+      .off-ns-d { background: #f07a11; }
+      .off-ns-e { background: #e63312; }
+      .off-r-check {
+        color: var(--sp-fg-dim);
+        font-size: 1.1rem;
+        flex-shrink: 0;
+      }
+
+      /* Cache manager */
+      .cache-mgr { display: flex; flex-direction: column; gap: 0; }
+      .cache-mgr-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--sp-divider);
+        margin-bottom: 0;
+      }
+      .cache-mgr-head h2 { margin: 0; flex: 1; }
+      .cache-list {
+        max-height: 380px;
+        overflow-y: auto;
+        margin: 0 -4px;
+      }
+      .cache-entry {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 4px;
+        border-bottom: 1px solid var(--sp-divider);
+      }
+      .cache-entry:last-child { border-bottom: none; }
+      .cache-entry-info { flex: 1; min-width: 0; }
+      .cache-entry-query {
+        font-weight: 600;
+        font-size: .9rem;
+        color: var(--sp-fg);
+      }
+      .cache-entry-meta {
+        font-size: .74rem;
+        color: var(--sp-fg-dim);
+        margin-top: 1px;
+      }
+      .cache-del {
+        font: inherit;
+        font-size: .82rem;
+        cursor: pointer;
+        background: none;
+        border: none;
+        color: var(--sp-fg-dim);
+        padding: 4px 8px;
+        border-radius: var(--sp-radius-sm);
+        transition: background-color .12s ease;
+      }
+      .cache-del:hover { background: var(--sp-surface); color: var(--error-color); }
+      .cache-empty {
+        padding: 24px 14px;
+        text-align: center;
+        font-size: .84rem;
+        color: var(--sp-fg-dim);
+        line-height: 1.5;
+      }
+      .cache-mgr-foot {
+        padding-top: 12px;
+        border-top: 1px solid var(--sp-divider);
+        margin-top: 4px;
+        display: flex;
+        justify-content: flex-end;
+      }
+      button.act.danger { color: var(--error-color); border-color: var(--error-color); }
+      button.act.danger:hover { background: color-mix(in srgb, var(--error-color) 10%, transparent); }
 
       /* Emoji / gradient tile placeholder */
       .ini-emoji {

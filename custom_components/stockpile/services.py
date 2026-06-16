@@ -100,6 +100,7 @@ SERVICES = [
     "parse_receipt",
     "set_package_position",
     "set_location_template",
+    "clear_product_cache",
 ]
 
 GET_SUMMARY_SCHEMA = vol.Schema({})
@@ -129,6 +130,9 @@ ADD_PACKAGE_SCHEMA = vol.Schema(
         vol.Optional("name"): cv.string,
         vol.Optional("brand"): cv.string,
         vol.Optional("unit"): cv.string,
+        # Product metadata — used when creating; fills missing fields on existing products.
+        vol.Optional("image"): cv.string,
+        vol.Optional("category"): cv.string,
         vol.Optional("remaining", default=100.0): vol.All(vol.Coerce(float), vol.Range(0, 100)),
         vol.Optional("quantity", default=1.0): vol.Coerce(float),
         vol.Optional("location_id"): cv.string,
@@ -136,6 +140,10 @@ ADD_PACKAGE_SCHEMA = vol.Schema(
         vol.Optional("expires"): cv.string,
         vol.Optional("notes"): cv.string,
     }
+)
+
+CLEAR_PRODUCT_CACHE_SCHEMA = vol.Schema(
+    {vol.Optional("key"): cv.string}
 )
 
 CONSUME_SCHEMA = vol.Schema(
@@ -250,6 +258,8 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def add_package(call: ServiceCall) -> ServiceResponse:
         db = get_db(hass)
         product_id = call.data.get("product_id")
+        image = call.data.get("image")
+        category = call.data.get("category")
         if not product_id:
             name = call.data.get("name")
             if not name:
@@ -258,9 +268,15 @@ def async_register_services(hass: HomeAssistant) -> None:
             existing = await db.find_product(name, brand)
             if existing:
                 product_id = existing["id"]
+                # Fill in missing metadata without overwriting user's existing data.
+                if image or category:
+                    await db.update_product_metadata(
+                        product_id, image=image, category=category
+                    )
             else:
                 product_id = await db.add_product(
-                    name=name, brand=brand, unit=call.data.get("unit")
+                    name=name, brand=brand, unit=call.data.get("unit"),
+                    image=image, category=category,
                 )
         pkg_id = await db.add_package(
             product_id=product_id,
@@ -543,6 +559,20 @@ def async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, "set_location_template", set_location_template,
         SET_LOCATION_TEMPLATE_SCHEMA,
+    )
+
+    async def clear_product_cache(call: ServiceCall) -> ServiceResponse:
+        db = get_db(hass)
+        key = call.data.get("key")
+        if key:
+            await db.delete_off_cache(key)
+            return {"deleted": 1, "key": key}
+        count = await db.clear_off_cache()
+        return {"deleted": count}
+
+    hass.services.async_register(
+        DOMAIN, "clear_product_cache", clear_product_cache,
+        CLEAR_PRODUCT_CACHE_SCHEMA, SupportsResponse.OPTIONAL,
     )
 
 
