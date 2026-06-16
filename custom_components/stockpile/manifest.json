@@ -1,7 +1,7 @@
 {
   "domain": "stockpile",
   "name": "Stockpile",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "documentation": "https://github.com/davbebawwy/stockpile",
   "issue_tracker": "https://github.com/davbebawwy/stockpile/issues",
   "codeowners": [
