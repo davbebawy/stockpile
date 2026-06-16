@@ -77,6 +77,7 @@ class StockpileCard extends HTMLElement {
     this._pendingTmplId = null;
     this._onKeydown = null;
     this._mapGhost = null;
+    this._locDetailOpen = false;
   }
 
   setConfig(config) {
@@ -210,13 +211,18 @@ class StockpileCard extends HTMLElement {
       <div class="overlay add-overlay" role="dialog" aria-modal="true">
         <div class="sheet add-sheet"></div>
       </div>
+      <div class="overlay loc-overlay" role="dialog" aria-modal="true">
+        <div class="sheet loc-sheet"></div>
+      </div>
     `;
     this._head = this.shadowRoot.querySelector(".head");
     this._body = this.shadowRoot.querySelector(".body");
-    this._overlay = this.shadowRoot.querySelector(".overlay:not(.add-overlay)");
+    this._overlay = this.shadowRoot.querySelector(".overlay:not(.add-overlay):not(.loc-overlay)");
     this._sheet = this._overlay.querySelector(".sheet");
     this._addOverlay = this.shadowRoot.querySelector(".add-overlay");
     this._addSheet = this._addOverlay.querySelector(".sheet");
+    this._locOverlay = this.shadowRoot.querySelector(".loc-overlay");
+    this._locSheet = this._locOverlay.querySelector(".loc-sheet");
 
     this._overlay.addEventListener("click", (e) => {
       if (e.target === this._overlay) this._closeDetail();
@@ -224,11 +230,15 @@ class StockpileCard extends HTMLElement {
     this._addOverlay.addEventListener("click", (e) => {
       if (e.target === this._addOverlay) this._closeAdd();
     });
+    this._locOverlay.addEventListener("click", (e) => {
+      if (e.target === this._locOverlay) this._closeLocDetail();
+    });
     if (this._onKeydown) document.removeEventListener("keydown", this._onKeydown);
     this._onKeydown = (e) => {
       if (e.key === "Escape") {
-        if (this._selected) this._closeDetail();
-        if (this._addOpen) this._closeAdd();
+        if (this._locDetailOpen) this._closeLocDetail();
+        else if (this._selected) this._closeDetail();
+        else if (this._addOpen) this._closeAdd();
       }
     };
     document.addEventListener("keydown", this._onKeydown);
@@ -254,7 +264,7 @@ class StockpileCard extends HTMLElement {
            ${this._locations
              .map(
                (l) =>
-                 `<button class="chip ${this._locationFilter === l.id ? "on" : ""}" data-loc="${l.id}" role="tab" aria-selected="${this._locationFilter === l.id}">${this._esc(l.name)}</button>`
+                 `<div class="chip-wrap ${this._locationFilter === l.id ? "on" : ""}" role="none"><button class="chip ${this._locationFilter === l.id ? "on" : ""}" data-loc="${l.id}" role="tab" aria-selected="${this._locationFilter === l.id}">${this._esc(l.name)}</button><button class="chip-detail" data-loc-detail="${l.id}" title="Location details" aria-label="Details for ${this._esc(l.name)}">⋯</button></div>`
              )
              .join("")}
          </div>`;
@@ -292,6 +302,12 @@ class StockpileCard extends HTMLElement {
         this._locationFilter = b.dataset.loc || null;
         this._productFilter = null;
         this._fetch();
+      })
+    );
+    this._head.querySelectorAll("[data-loc-detail]").forEach((b) =>
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._openLocationDetail(b.dataset.locDetail);
       })
     );
     const expBtn = this._head.querySelector("[data-expfilter]");
@@ -1358,6 +1374,122 @@ class StockpileCard extends HTMLElement {
       const locs = await this._hass.connection.sendMessagePromise({ type: "stockpile/locations" });
       this._locations = locs.locations || [];
       this._render();
+    } catch (e) {
+      console.error("stockpile: set_location_template failed", e);
+    }
+  }
+
+  // ----- location detail overlay ------------------------------------ //
+  async _openLocationDetail(locId) {
+    const loc = this._locations.find((l) => l.id === locId);
+    if (!loc) return;
+    this._locDetailOpen = true;
+    this._pendingTmplId = null;
+    this._locDetailPkgCount = null;
+    this._renderLocationDetail(loc);
+    this._locOverlay.classList.add("open");
+    try {
+      const res = await this._hass.connection.sendMessagePromise({ type: "stockpile/packages", location_id: locId });
+      this._locDetailPkgCount = (res.packages || []).length;
+      if (this._locDetailOpen) this._renderLocationDetail(loc);
+    } catch (e) { this._locDetailPkgCount = 0; }
+  }
+
+  _closeLocDetail() {
+    this._locDetailOpen = false;
+    this._pendingTmplId = null;
+    this._locOverlay.classList.remove("open");
+  }
+
+  _renderLocationDetail(loc) {
+    const count = this._locDetailPkgCount;
+    const countLine = count != null
+      ? `<div class="loc-meta">${count} package${count !== 1 ? "s" : ""}</div>`
+      : `<div class="loc-meta">…</div>`;
+    const tmpl = loc.template_id ? this._templates.find((t) => t.id === loc.template_id) : null;
+    const tmplSection = tmpl
+      ? `<div class="loc-tmpl-info">
+           <div class="loc-tmpl-row">
+             <div class="loc-tmpl-svg">${tmpl.default_svg}</div>
+             <div class="loc-tmpl-name">${this._esc(tmpl.label)}</div>
+           </div>
+           <div class="loc-tmpl-actions">
+             <button class="link" data-reconfig-tmpl="1">Reconfigure</button>
+             <button class="btn-primary" data-open-map="1">View Floor Plan →</button>
+           </div>
+         </div>`
+      : `<div class="loc-no-tmpl">No floor plan assigned. Choose a template to visualize this location.</div>
+         ${this._renderTemplateSetup(loc)}`;
+
+    this._locSheet.innerHTML = `
+      <h2>${this._esc(loc.name)}</h2>
+      ${countLine}
+      <div class="loc-section-title">Floor Plan</div>
+      ${tmplSection}
+      <div class="close-row">
+        <span></span>
+        <button class="close" data-close-loc="1">Close</button>
+      </div>`;
+
+    this._locSheet.querySelector("[data-close-loc]").addEventListener("click", () => this._closeLocDetail());
+
+    if (tmpl) {
+      const mapBtn = this._locSheet.querySelector("[data-open-map]");
+      if (mapBtn) mapBtn.addEventListener("click", () => {
+        this._closeLocDetail();
+        this._locationFilter = loc.id;
+        this._gridMode = "map";
+        this._locationSvg = null;
+        this._locationSvgId = null;
+        this._view = "grid";
+        this._fetch().then(() => this._render());
+      });
+      const reconfigBtn = this._locSheet.querySelector("[data-reconfig-tmpl]");
+      if (reconfigBtn) reconfigBtn.addEventListener("click", () => {
+        this._pendingTmplId = loc.template_id;
+        this._locSheet.innerHTML = `
+          <h2>${this._esc(loc.name)}</h2>
+          ${this._renderTemplateSetup(loc)}
+          <div class="close-row"><span></span><button class="close" data-close-loc="1">Close</button></div>`;
+        this._locSheet.querySelector("[data-close-loc]").addEventListener("click", () => this._closeLocDetail());
+        this._wireLocTemplateSetup(loc);
+      });
+    } else {
+      this._wireLocTemplateSetup(loc);
+    }
+  }
+
+  _wireLocTemplateSetup(loc) {
+    this._locSheet.querySelectorAll("[data-tmpl]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._pendingTmplId = b.dataset.tmpl;
+        this._renderLocationDetail(loc);
+      })
+    );
+    const applyBtn = this._locSheet.querySelector("[data-apply-tmpl]");
+    if (applyBtn) applyBtn.addEventListener("click", () => this._applyTemplateFromLocDetail(loc.id));
+  }
+
+  async _applyTemplateFromLocDetail(locationId) {
+    const tmpl = this._templates.find((t) => t.id === this._pendingTmplId);
+    if (!tmpl) return;
+    const config = {};
+    this._locSheet.querySelectorAll("[data-cfg]").forEach((el) => {
+      config[el.dataset.cfg] = el.type === "checkbox" ? el.checked : Number(el.value);
+    });
+    try {
+      await this._hass.callService("stockpile", "set_location_template", {
+        location_id: locationId,
+        template_id: this._pendingTmplId,
+        template_config: JSON.stringify(config),
+      });
+      this._pendingTmplId = null;
+      this._locationSvg = null;
+      this._locationSvgId = null;
+      const locs = await this._hass.connection.sendMessagePromise({ type: "stockpile/locations" });
+      this._locations = locs.locations || [];
+      const loc = this._locations.find((l) => l.id === locationId);
+      if (loc && this._locDetailOpen) this._renderLocationDetail(loc);
     } catch (e) {
       console.error("stockpile: set_location_template failed", e);
     }
@@ -2593,6 +2725,79 @@ class StockpileCard extends HTMLElement {
         border-radius: 6px;
         color: var(--sp-fg-dim);
       }
+
+      /* Compound location chips */
+      .chip-wrap {
+        display: inline-flex;
+        border-radius: var(--sp-radius-pill);
+        border: 1px solid var(--sp-divider);
+        overflow: hidden;
+      }
+      .chip-wrap .chip {
+        border: none;
+        border-radius: 0;
+        padding-right: 8px;
+      }
+      .chip-detail {
+        font: inherit;
+        font-size: .76rem;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 0 9px;
+        min-height: 32px;
+        background: transparent;
+        border: none;
+        border-left: 1px solid var(--sp-divider);
+        color: var(--sp-fg-dim);
+        transition: background-color .15s ease, color .15s ease;
+        letter-spacing: .03em;
+      }
+      .chip-detail:hover { background: var(--sp-surface); color: var(--sp-fg); }
+      .chip-detail:focus-visible { outline: 2px solid var(--sp-primary); outline-offset: -2px; }
+      .chip-wrap.on .chip-detail {
+        border-left-color: rgba(255,255,255,.3);
+        background: rgba(255,255,255,.12);
+        color: rgba(255,255,255,.85);
+      }
+      .chip-wrap.on .chip-detail:hover { background: rgba(255,255,255,.22); }
+
+      /* Location detail sheet */
+      .loc-sheet { width: min(440px, 92vw); }
+      .loc-meta {
+        font-size: .82rem;
+        color: var(--sp-fg-dim);
+        margin: -4px 0 16px;
+      }
+      .loc-section-title {
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--sp-fg-dim);
+        margin-bottom: 12px;
+        padding-top: 4px;
+        border-top: 1px solid var(--sp-divider);
+      }
+      .loc-no-tmpl {
+        font-size: .84rem;
+        color: var(--sp-fg-dim);
+        margin-bottom: 14px;
+        line-height: 1.5;
+      }
+      .loc-tmpl-info { display: flex; flex-direction: column; gap: 14px; }
+      .loc-tmpl-row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px;
+        background: var(--sp-surface);
+        border-radius: var(--sp-radius-md);
+        border: 1px solid var(--sp-divider);
+      }
+      .loc-tmpl-svg { width: 54px; height: 42px; flex-shrink: 0; color: var(--sp-fg-dim); }
+      .loc-tmpl-svg svg { max-width: 54px; max-height: 42px; }
+      .loc-tmpl-name { font-weight: 600; font-size: .92rem; color: var(--sp-fg); }
+      .loc-tmpl-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
       @media (prefers-reduced-motion: reduce) {
         .tile, .level, .r-bar span, .overlay, .sheet { transition: none; animation: none; }
