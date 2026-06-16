@@ -1,7 +1,7 @@
 """Constants for the Stockpile integration."""
 
 DOMAIN = "stockpile"
-VERSION = "0.9.1"
+VERSION = "1.0.0"
 
 DB_FILENAME = "stockpile.db"
 
