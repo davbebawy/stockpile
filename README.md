@@ -1,365 +1,212 @@
 # Stockpile
 
-A Home Assistant native inventory system for chest freezers, garage pantries,
-household supplies, and any other storage location — built as a proper custom
-integration with a SQLite backend, not one HA entity per item.
+Home Assistant inventory management with a SQLite backend. Tracks individual packages (partial consumption, brand, image, location, expiry) and presents aggregated views. Two Lovelace cards share a location picker, floor-plan map, receipt parsing, QR codes, and Open Food Facts lookup — no external dependencies.
 
-Stockpile tracks **individual packages** (partial consumption, brand, image,
-location, dates) while presenting **aggregated views** ("Ground Beef — 3
-packages, 2.25 lb remaining"). Two bundled Lovelace cards — a summary and a
-detailed grid — share a location picker, quick consume actions, an in-card
-add flow, a floor-plan map mode, and a visual configuration editor.
-
-> Status: feature-complete. Integration and both cards work end-to-end.
-> See [ROADMAP.md](ROADMAP.md) for what shipped.
+> Current version: **1.1.0** — see [ROADMAP.md](ROADMAP.md)
 
 ---
 
-## Why a database, not entities or JSON
+## Install
 
-- **Not entities.** Home Assistant's state machine is not built for hundreds of
-  mutable, attribute-rich records; it would bloat the entity registry and the
-  recorder.
-- **Not flat JSON.** A card cannot read `/config/*.json` directly, and
-  concurrent writes corrupt the file. SQLite gives atomic writes (WAL), real
-  queries for aggregation and history, and a clean WebSocket channel to the
-  cards.
+**HACS (recommended):** HACS → Custom repositories → add this repo as Integration → Install → restart HA → Settings → Devices & Services → Add Integration → Stockpile.
 
-The only entities the integration creates are three derived summary sensors
-intended for automations.
+**Manual:** copy `custom_components/stockpile/` to `config/custom_components/`, restart, add integration.
 
----
+The cards register themselves — no resource configuration needed. If a card doesn't appear, hard-refresh the browser.
 
-## Requirements
+**Requirements:** Home Assistant 2025.6.0+, Python packages `aiosqlite` and `qrcode` (auto-installed).
 
-- Home Assistant **2025.6.0** or newer
-- `aiosqlite>=0.20.0` and `qrcode>=7.4.2` (installed automatically)
-
-## Install (HACS)
-
-Stockpile ships the cards **inside** the integration, so HACS installs and
-updates everything together — no copying JavaScript or registering resources.
-
-1. HACS → menu → **Custom repositories**. Add the repository URL with the
-   category **Integration**.
-2. Install **Stockpile**, then restart Home Assistant.
-3. **Settings → Devices & Services → Add Integration → Stockpile**.
-
-The database is created at `config/stockpile.db` and the cards register
-themselves with the frontend. If a card does not appear, hard-refresh the
-browser to clear the cached module.
-
-### Manual install
-
-Copy `custom_components/stockpile/` into `config/custom_components/`, restart
-Home Assistant, then add the integration. The cards are auto-registered the
-same way.
-
-### Load demo data
-
-Developer Tools → Actions → `stockpile.seed_demo` → Run. This adds a realistic
-set of items across Freezer, Pantry, and Garage locations, including some that
-are below their low-stock threshold. The action is idempotent — running it
-again does nothing.
+**Demo data:** Developer Tools → Actions → `stockpile.seed_demo` → Run. Adds realistic items across Freezer, Pantry, and Garage locations.
 
 ---
 
-## The cards
-
-Add either card from the dashboard card picker, or define it in YAML. Both
-cards expose a visual configuration editor, so YAML is optional.
+## Cards
 
 ```yaml
-# Aggregated overview, with a Summary / Items toggle and location chips
-type: custom:stockpile-summary-card
-title: Kitchen
-
-# Detailed package grid
-type: custom:stockpile-card
+type: custom:stockpile-card          # package grid (default view: Items)
 title: Freezer
-location_id: loc_xxxxxxxx   # optional: pin to one spot, hides the picker
-columns: 10                 # optional: fixed column count (e.g. 2 rows of 10)
-min_tile: 150               # optional: minimum tile width when columns is unset
-show_expiring: true         # optional: surface expiring/expired items
+location_id: loc_xxxxxxxx            # optional: pin to one location
+columns: 10                          # optional: fixed column count
+min_tile: 150                        # optional: min tile width px
+show_expiring: true                  # optional: expiry badges and filter
+
+type: custom:stockpile-summary-card  # aggregated overview (default view: Summary)
+title: Kitchen
 ```
+
+Both cards have a visual config editor — YAML is optional.
 
 ---
 
-## Feature guide
+## Views
 
-### Location picker
+The **Summary / Items / History / Trends** tabs are in the top-right of every card.
 
-Chips at the top of the card filter the current view to a single storage
-location. Tap a chip to switch; the active chip is highlighted.
-
-Each named location chip has a **⋯** button on its right edge. Tapping ⋯
-opens the **Location Detail** sheet for that location — see below.
-
-### Views (Summary / Items / History / Trends)
-
-The segment control in the top-right corner switches between four views.
-
-| View | What it shows |
+| Tab | What it shows |
 |---|---|
-| **Summary** | One row per product with an aggregated progress bar, package count, and remaining quantity. Tap a row to drill into that product's packages in the grid. |
-| **Items** | The package grid. Tap any tile to open its detail sheet. |
-| **History** | Up to 200 most recent consumption events across all visible packages, with timestamps and user attribution. |
-| **Trends** | 14-day sparkline bar charts per product — shows which items are being consumed most actively. |
+| Summary | One row per product — aggregated stock bar, package count, qty remaining. Tap a row to drill into that product in Items. |
+| Items | Package grid. Tap a tile to open its detail sheet. |
+| History | Last 200 consumption events with local timestamps and user attribution. |
+| Trends | 14-day sparkline bar charts per product. |
 
-### Detail sheet
+---
 
-Tap any tile in the Items grid to open the package detail sheet. It shows:
+## Location chips
 
-- Remaining percentage (color-coded), quantity, location, and dates
-- **Usage velocity** — 30-day consumption rate and a "runs out in N days"
-  estimate when there is enough data
-- **Recent activity** — last 8 consumption events for this product
-- **Use 10 / 25 / 50 / all** quick-consume buttons
-- **Custom slider** — precise consume amount
-- **Snooze 1d / 7d** — suppresses low-stock alerts for this product
-- **Acknowledge** — marks the product as reviewed
-- **QR code** — see below
-- **Remove** — deletes the package
-
-### Adding a package
-
-In the Items view, tap **+ Add** in the toolbar. The form opens inline:
-
-- The **Name** field autocompletes from your existing product catalog; selecting
-  a known product auto-fills Brand and Unit.
-- Choose a location from the dropdown.
-- Set remaining %, quantity, and optional expiration date.
-- Tap **Add**.
-
-### Arrange mode
-
-In the Items view, tap **Arrange** in the toolbar to drag tiles into the
-physical order that matches your shelf layout. Use **+ cols / − cols** to
-control the grid width. Tap **Done** when finished. Order is saved per package
-and survives items coming and going.
-
-Arrange uses Pointer Events and works on phones and tablets.
-
-### Expiring items
-
-Packages with an expiration date display a corner badge when approaching
-expiry. Expired packages get a red outline. Enable with `show_expiring: true`
-(the default). An **Expiring** filter chip narrows either view to only
-expiring/expired items.
-
-### Velocity
-
-The detail sheet shows a 30-day usage rate (per week) and a "runs out in N
-days" estimate for products with recent consumption activity.
-
-### Snooze / Acknowledge
-
-Per-product buttons in the detail sheet silence alerts for 1 or 7 days, or
-mark a product as reviewed. All notifications, sensors, and the Expiring filter
-chip respect snooze.
+Chips at the top filter the view to one location. The **⋯** button beside each named chip opens a **Location Detail** sheet where you can assign or reconfigure a floor-plan template and jump directly to the floor plan.
 
 ---
 
 ## Floor plan (Map mode)
 
-Map mode lets you place packages at their actual physical position on a
-schematic of the storage location.
+Visualise a storage location as a 2D schematic with packages placed at their physical positions.
 
-### Quick start
+**Getting there:**
+1. Tap a location chip to select it (e.g. "Freezer Top").
+2. In the **Items** tab, tap **Map** in the toolbar.
+3. If no template is assigned yet, the template picker opens — choose one, adjust parameters, tap **Apply template**. The floor plan popup opens automatically.
+4. Next time: Map opens the popup directly.
 
-1. **Select a location** using the chip at the top of the card (e.g. "Freezer").
-2. In the Items view, tap **Map** in the toolbar.
-3. If the location has no floor plan yet, you will be prompted to choose a
-   template (see below). Otherwise the floor plan opens immediately.
-4. **Drag** any tile from the staging tray at the bottom onto the canvas to
-   place it. Drag a placed tile to reposition it. Drag a placed tile off the
-   canvas to return it to the staging tray.
-5. Tap any placed tile to open its normal detail sheet.
+**Alternative:** tap **⋯** on a location chip → **View Floor Plan →**.
 
-### Location Detail sheet (⋯ button)
+**Using the popup:**
+- Tiles without a position appear in the staging tray at the bottom — **drag them onto the canvas** to place.
+- Drag a placed tile to reposition it; drag it off the canvas to return it to the tray.
+- Tap any tile to open its normal detail sheet.
 
-Every location chip has a **⋯** button. Tapping it opens the Location Detail
-sheet, which is the primary way to manage a location's floor plan:
+**Templates** (three included, all use `currentColor` SVG for dark/light themes):
 
-- If no template is assigned, the template picker is shown directly.
-- If a template is already assigned, a preview is shown with two buttons:
-  - **Reconfigure** — change the template or its parameters.
-  - **View Floor Plan →** — jump directly to the floor plan for this location
-    (selects the location and switches to Map mode automatically).
-
-### Templates
-
-Three schematic templates are included. Each uses context-appropriate
-projection so the layout makes visual sense:
-
-| Template | Projection | Best for |
+| Template | Projection | Use for |
 |---|---|---|
-| **Chest Freezer** | Top-down | Chest freezers, under-bed storage, flat bins |
-| **Wire Rack** | Front elevation | Garage shelving, wire metro racks |
-| **Refrigerator** | Front elevation | Upright fridges, pantry cabinets |
+| Chest Freezer | Top-down | Chest freezers, flat bins |
+| Wire Rack | Front elevation | Garage shelving, metro racks |
+| Refrigerator | Front elevation | Upright fridges, pantry cabinets |
 
-Each template has configurable parameters (shelf count, basket sections, etc.)
-that appear after you select a template thumbnail. Adjust the parameters and
-tap **Apply template** to save.
-
-Templates use `currentColor` SVG so they automatically adapt to HA's dark and
-light themes.
+Each template has configurable parameters (shelf count, basket divisions, etc.).
 
 ---
 
-## QR codes
+## Adding a package
 
-Every package can generate a QR code that deep-links directly to its consume
-sheet.
+Items tab → **+ Add**. The add form:
 
-1. Tap a package tile to open its detail sheet.
-2. Tap **QR code** in the action row.
-3. Print or display the QR code on the physical package.
-4. Scanning the QR with any phone camera opens HA and jumps straight to the
-   consume sheet for that package.
+- **Name** — autocompletes from your catalog. Selecting a known product fills Brand and Unit.
+- **🔍 button** — searches Open Food Facts (see below). Fills image, brand, unit, category automatically.
+- **Product cache ›** — manage previously cached OFF lookups.
+- Brand, Unit, Location, Remaining %, Quantity, Expires.
 
-The QR endpoint (`/api/stockpile/qr`) is same-origin only — it refuses to
-generate codes for external URLs.
+---
+
+## Open Food Facts lookup
+
+In the Add form, type a product name and tap **🔍**. Stockpile searches Open Food Facts and returns up to 6 matches showing image, brand, unit, Nutri-Score, and category. Tap a result to auto-fill the form.
+
+Results are **cached in SQLite** — subsequent searches for the same term return instantly without a network call.
+
+**Cache management:** Add form → **Product cache ›** lists every cached search with result count and date. Delete individual entries or **Clear all**. Force a fresh fetch from within automations with `force_refresh: true` on the `stockpile/search_product` WebSocket command.
+
+```yaml
+# Remove one cached entry so the next lookup re-fetches from OFF
+service: stockpile.clear_product_cache
+data:
+  key: "pasta"        # omit key to clear everything
+```
 
 ---
 
 ## Receipt parsing
 
-Paste text from a shopping receipt to bulk-add items to your inventory.
-
-1. In the Items view, tap **Receipt** in the toolbar.
-2. Paste the receipt text (copy from email, PDF, or camera OCR).
-3. Tap **Parse** — the server extracts product names, quantities, and units,
-   and matches them against your existing catalog.
-4. A review screen shows each detected item with a checkbox, editable name,
-   quantity, and unit. Items matched to existing catalog products are labelled
-   **Catalog**; new products are labelled **New**.
-5. Optionally select a location from the dropdown.
-6. Tap **Add checked** to bulk-add all ticked items.
-
-The parser strips prices, barcodes, and store codes; it handles common
-multi-quantity patterns ("PASTA 12OZ x4", "3LB GROUND BEEF").
+Items tab → **Receipt**. Paste receipt text, tap **Parse**. The server strips prices, extracts product names and quantities, and matches against your catalog. Review the suggestions (edit name, qty, unit; uncheck items to skip), pick a location, and tap **Add checked**.
 
 ---
 
-## Actions
+## QR codes
+
+Detail sheet → **QR code** — generates a QR that deep-links to the consume sheet for that package. Print it and stick it on the physical package. Scanning opens HA directly to the consume controls.
+
+---
+
+## Tiles without images
+
+Products with no image get a **deterministic gradient background** (consistent color per product) and a **category emoji** (🥩 meat, 🐟 seafood, 🍝 pasta, 🧻 paper goods, etc.) derived from the product name. Use the Open Food Facts lookup to pull in a real product photo.
+
+---
+
+## Automation actions
 
 | Action | Purpose |
 |---|---|
-| `stockpile.add_product` | Create a catalog product. |
-| `stockpile.add_package` | Add a package. Pass `product_id`, or `name` / `brand` to find-or-create. |
-| `stockpile.consume` | Reduce a package's remaining percentage by `amount`; logs the event. |
-| `stockpile.set_remaining` | Set a package's remaining percentage to an absolute value. |
+| `stockpile.add_product` | Create a catalog entry. |
+| `stockpile.add_package` | Add a package. Pass `product_id` or `name`/`brand` to find-or-create. Accepts `image` and `category` to enrich the product. |
+| `stockpile.consume` | Reduce remaining % by `amount`. |
+| `stockpile.set_remaining` | Set remaining % to an absolute value. |
 | `stockpile.remove_package` / `remove_product` | Delete records. |
 | `stockpile.add_location` | Create a storage location. |
-| `stockpile.reorder` | Set manual display order (`package_ids` in the desired order). |
-| `stockpile.set_package_position` | Set or clear a package's floor-plan coordinates (`loc_x`, `loc_y` as 0–100 percentages, or omit both to unstage). |
-| `stockpile.set_location_template` | Assign a schematic template to a location. Pass `template_id` and optional `template_config` JSON. |
-| `stockpile.parse_receipt` | Extract product lines from receipt text. Returns `suggestions` list with name, qty, unit, and matched product. |
+| `stockpile.reorder` | Set display order (`package_ids` list). |
+| `stockpile.set_package_position` | Set or clear floor-plan `loc_x`/`loc_y` (0–100%). |
+| `stockpile.set_location_template` | Assign a schematic template to a location. |
+| `stockpile.parse_receipt` | Extract product lines from receipt text. Returns `suggestions`. |
+| `stockpile.suggest_restock` | Velocity-based reorder suggestions. |
+| `stockpile.push_to_todo` | Add low-stock / expiring items to a `todo` entity. |
+| `stockpile.compose_notification` | Build a title + message for low-stock / expiring items. |
+| `stockpile.snooze` | Silence alerts for one product (`hours`, `days`, or `until`). |
+| `stockpile.acknowledge` | Mark a product as reviewed; clears snooze. |
+| `stockpile.clear_product_cache` | Delete one (`key:`) or all OFF cache entries. |
+| `stockpile.export` / `import_data` | Full backup and restore (includes snooze state). |
 | `stockpile.seed_demo` | Load demo data (idempotent). |
-| `stockpile.get_summary` / `list_packages` | Read data (returns a response). |
-| `stockpile.export` | Dump the full dataset as a JSON-safe object (returns a response). |
-| `stockpile.import_data` | Restore from an `export` payload. Set `replace: true` to wipe first. |
-| `stockpile.compose_notification` | Build a short title / message summary of low-stock and expiring items. |
-| `stockpile.snooze` | Suppress alerts for one product (`hours`, `days`, or `until`). |
-| `stockpile.acknowledge` | Mark a product as reviewed; clears any active snooze. |
-| `stockpile.push_to_todo` | Add low-stock / expiring items to a Home Assistant `todo` entity. |
-| `stockpile.suggest_restock` | Velocity-based reorder suggestions with quantities. |
 
-## WebSocket API
-
-Used by the cards; also available to other front-end code.
-
-| Message | Parameters | Returns |
-|---|---|---|
-| `stockpile/packages` | `location_id?` | `packages` list |
-| `stockpile/products` | — | `products` list |
-| `stockpile/summary` | — | aggregated product rows |
-| `stockpile/locations` | — | `locations` list (includes `template_id`) |
-| `stockpile/history` | `product_id?`, `limit?` | `history` list |
-| `stockpile/velocity` | `product_id`, `days?` | velocity object |
-| `stockpile/trends` | `days?` | per-product daily consumption map |
-| `stockpile/templates` | `location_id?` | template list; when `location_id` is given, also returns `location_svg` (rendered SVG for that location) |
-| `stockpile/subscribe` | — | pushes on every data change (drives live refresh) |
+---
 
 ## Sensors
 
-- `sensor.stockpile_total_packages` — count of packages currently tracked.
-- `sensor.stockpile_low_stock` — number of products below their threshold;
-  items are listed in the `items` attribute (useful for shopping reminders).
-- `sensor.stockpile_expiring_soon` — number of packages within the
-  expiration warning window or already past expiry; items are listed in the
-  `items` attribute.
-
-## Status colors
-
-| Range | Token |
+| Entity | Value |
 |---|---|
-| 75 – 100 % | `--success-color` |
-| 30 – 74 % | `--warning-color` |
-| 1 – 29 % | `--error-color` |
-| 0 % | `--disabled-text-color` |
-
-Status color is the one bold visual; every other surface uses Home Assistant
-theme tokens so the card adapts to your chosen palette.
+| `sensor.stockpile_total_packages` | Total package count |
+| `sensor.stockpile_low_stock` | Products below threshold (`items` attribute lists them) |
+| `sensor.stockpile_expiring_soon` | Packages expiring or expired (`items` attribute) |
 
 ---
 
 ## Blueprints
 
-Three ready-made automation blueprints live in
-[`blueprints/automation/stockpile/`](blueprints/automation/stockpile):
+[`blueprints/automation/stockpile/`](blueprints/automation/stockpile) includes:
 
-- **`door_review_prompt.yaml`** — when a freezer or cabinet door stays open
-  for a few seconds, send a Stockpile review prompt (low stock and expiring
-  soon) to a chosen notification target. Respects quiet hours.
-- **`low_stock_daily.yaml`** — once a day at a chosen time, send a summary of
-  low-stock and expiring items. Sends nothing when inventory is healthy.
-- **`targeted_popup.yaml`** — send a popup to a specific device; accepts an
-  optional dashboard URL that opens Stockpile directly in the companion app.
+- **`door_review_prompt.yaml`** — door sensor triggers a low-stock/expiring prompt. Respects quiet hours.
+- **`low_stock_daily.yaml`** — daily summary; silent when inventory is healthy.
+- **`targeted_popup.yaml`** — popup on a specific device with optional dashboard deep-link.
 
-All three rely on `stockpile.compose_notification` and work with any
-`notify.*` service.
+---
 
-## Backup and restore
+## Backup
 
-`stockpile.export` returns the whole dataset (locations, products, packages,
-consumption log) as JSON. Capture it with `response_variable` and store it
-wherever you keep HA backups. `stockpile.import_data` round-trips the result
-back into the database; pass `replace: true` to start from a clean slate.
+`stockpile.export` returns the full dataset (locations, products, packages, consumption log, snooze state) as JSON. `stockpile.import_data` restores it; pass `replace: true` to wipe first.
+
+---
 
 ## Development
 
-Stockpile ships a pytest suite covering the data layer: alias matching,
-expiration enrichment, snooze filtering, velocity windows, suggest_restock
-logic, export / import round-trips, and ordering preservation.
-
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements_test.txt
 pytest
 ```
 
-To release a new version:
-
 ```bash
-python3 scripts/release.py 0.10.0 "Short release description"
+python3 scripts/release.py 1.2.0 "Short description"
 ```
 
-This bumps the version in `manifest.json`, `const.py`, and the card JS,
-commits, creates an annotated tag, pushes, and opens a GitHub release.
+---
 
 ## Data model
 
-- **products** — catalog: name, brand, unit, category, image, aliases, threshold.
-- **packages** — instances: product, `remaining` percentage, quantity,
-  location, `position`, `loc_x`/`loc_y` (floor-plan coordinates, 0–100%),
-  added / frozen / expires dates.
-- **locations** — freezer baskets, shelves, racks; stores `template_id` and
-  `template_config` for floor-plan rendering.
-- **consumption_log** — who / when / how much.
-- **product_state** — per-product snooze and acknowledgement.
+| Table | Contents |
+|---|---|
+| `products` | Catalog: name, brand, unit, category, image, aliases, threshold |
+| `packages` | Instances: remaining %, quantity, location, position, `loc_x`/`loc_y`, dates |
+| `locations` | Storage locations with `template_id` / `template_config` |
+| `consumption_log` | Who consumed what, when, how much |
+| `product_state` | Per-product snooze and acknowledgement |
+| `off_cache` | Cached Open Food Facts search results |
 
 ## License
 
