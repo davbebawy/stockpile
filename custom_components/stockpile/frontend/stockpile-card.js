@@ -23,7 +23,7 @@
  *   show_expiring: true         # optional: highlight expiring items in views
  */
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 
 const STATUS_VAR = {
   full: "var(--success-color, #2e7d32)",
