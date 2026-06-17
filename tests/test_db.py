@@ -174,7 +174,7 @@ async def test_export_import_roundtrip_replace(db, tmp_path):
     await other.async_init()
     try:
         counts = await other.import_all(dump, replace=True)
-        assert counts == {"locations": 1, "products": 1, "packages": 1, "log": 1}
+        assert counts == {"locations": 1, "products": 1, "packages": 1, "log": 1, "product_state": 0}
         products = await other.get_products()
         assert products[0]["aliases"] == ["spaghetti"]
         packages = await other.get_packages()

@@ -58,6 +58,7 @@ class StockpileCard extends HTMLElement {
     this._packages = [];
     this._locations = [];
     this._products = [];
+    this._fetchToken = 0;
     this._started = false;
     this._arrange = false;
     this._selected = null;
@@ -154,6 +155,7 @@ class StockpileCard extends HTMLElement {
 
   async _fetch() {
     if (this._arrange) return;
+    const token = ++this._fetchToken;
     try {
       const msg = { type: "stockpile/packages" };
       if (this._locationFilter) msg.location_id = this._locationFilter;
@@ -161,10 +163,13 @@ class StockpileCard extends HTMLElement {
         this._hass.connection.sendMessagePromise(msg),
         this._hass.connection.sendMessagePromise({ type: "stockpile/products" }).catch(() => ({ products: this._products })),
       ]);
+      // Discard stale completions when a newer fetch has started.
+      if (token !== this._fetchToken) return;
       this._packages = res.packages || [];
       this._products = prods.products || [];
       if (this._view === "history") await this._loadFullHistory();
       else if (this._view === "trends") await this._loadTrends();
+      if (token !== this._fetchToken) return;
       this._render();
       if (this._selected) this._refreshDetail();
       if (this._fpOpen && this._fpLocId) {
@@ -1441,89 +1446,100 @@ class StockpileCard extends HTMLElement {
   }
 
   _wireMapDrag(canvas, tray) {
+    this._wirePointerXYDrag(canvas, tray, {
+      ghostKey: "_mapGhost",
+      movedKey: "_mapDragMoved",
+      onCommit: ({ id, locX, locY }) => this._persistMapPosition(id, locX, locY),
+    });
+  }
+
+  // Shared pointer-based XY drag for map and floor-plan views.
+  // Uses absolute clientX/Y (movementX/Y is unreliable in Safari).
+  // Attaches move/up to `document` once a drag starts so the gesture survives
+  // pointers that leave the canvas+tray, even when shadow-DOM pointer capture
+  // misbehaves.
+  _wirePointerXYDrag(canvas, tray, { ghostKey, movedKey, onCommit }) {
     let dragging = null;
     let ghost = null;
-    this._mapDragMoved = false;
+    let docBound = false;
+    const THRESH = 6;
+    this[movedKey] = false;
 
-    const DRAG_THRESHOLD = 6;
-
-    const startDrag = (tile, e) => {
-      e.preventDefault();
-      this._mapDragMoved = false;
-      const box = tile.getBoundingClientRect();
-      dragging = {
-        id: tile.dataset.id,
-        fromTray: tile.classList.contains("staged"),
-        startX: e.clientX,
-        startY: e.clientY,
-      };
-      ghost = tile.cloneNode(true);
-      ghost.classList.add("map-ghost");
-      // Inline positional styles so Shadow DOM stylesheet can apply the rest.
-      // position:fixed inside Shadow DOM is viewport-relative (no transform on host).
-      ghost.style.cssText = `position:fixed;width:${box.width}px;left:${box.left}px;top:${box.top}px;`;
-      this._mapGhost = ghost;
-      this.shadowRoot.appendChild(ghost);
-      tile.style.opacity = "0.25";
-      tile.setPointerCapture && tile.setPointerCapture(e.pointerId);
-      dragging.tile = tile;
+    const attachDoc = () => {
+      if (docBound) return;
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+      document.addEventListener("pointercancel", onUp);
+      docBound = true;
+    };
+    const detachDoc = () => {
+      if (!docBound) return;
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+      docBound = false;
     };
 
     const onDown = (e) => {
       const t = e.target.closest(".map-tile");
       if (!t) return;
-      startDrag(t, e);
+      e.preventDefault();
+      this[movedKey] = false;
+      const box = t.getBoundingClientRect();
+      dragging = {
+        id: t.dataset.id,
+        fromTray: t.classList.contains("staged"),
+        startX: e.clientX,
+        startY: e.clientY,
+        offsetX: e.clientX - box.left,
+        offsetY: e.clientY - box.top,
+        width: box.width,
+        tile: t,
+      };
+      try { t.setPointerCapture && t.setPointerCapture(e.pointerId); } catch (_) {}
+      attachDoc();
     };
 
     const onMove = (e) => {
       if (!dragging) return;
-      const dx = e.clientX - dragging.startX;
-      const dy = e.clientY - dragging.startY;
-      if (!this._mapDragMoved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-      this._mapDragMoved = true;
-      if (ghost) {
-        ghost.style.left = (parseFloat(ghost.style.left) + e.movementX) + "px";
-        ghost.style.top = (parseFloat(ghost.style.top) + e.movementY) + "px";
+      const dx = e.clientX - dragging.startX, dy = e.clientY - dragging.startY;
+      if (!this[movedKey] && Math.hypot(dx, dy) < THRESH) return;
+      if (!this[movedKey]) {
+        // Defer ghost + tile-fade until threshold crossed so plain clicks don't flicker.
+        this[movedKey] = true;
+        ghost = dragging.tile.cloneNode(true);
+        ghost.classList.add("map-ghost");
+        ghost.style.cssText = `position:fixed;width:${dragging.width}px;left:${e.clientX - dragging.offsetX}px;top:${e.clientY - dragging.offsetY}px;`;
+        this[ghostKey] = ghost;
+        this.shadowRoot.appendChild(ghost);
+        dragging.tile.style.opacity = "0.25";
       }
+      ghost.style.left = (e.clientX - dragging.offsetX) + "px";
+      ghost.style.top = (e.clientY - dragging.offsetY) + "px";
     };
 
     const onUp = async (e) => {
       if (!dragging) return;
-      if (dragging.tile) dragging.tile.style.opacity = "";
-      if (ghost) { ghost.remove(); ghost = null; this._mapGhost = null; }
-
-      if (this._mapDragMoved && canvas) {
-        const canvasRect = canvas.getBoundingClientRect();
-        const overCanvas = (
-          e.clientX >= canvasRect.left && e.clientX <= canvasRect.right &&
-          e.clientY >= canvasRect.top  && e.clientY <= canvasRect.bottom
-        );
-
-        const id = dragging.id;
-        if (overCanvas) {
-          const loc_x = Math.max(2, Math.min(98, ((e.clientX - canvasRect.left) / canvasRect.width) * 100));
-          const loc_y = Math.max(2, Math.min(98, ((e.clientY - canvasRect.top) / canvasRect.height) * 100));
-          await this._persistMapPosition(id, loc_x, loc_y);
-        } else if (!dragging.fromTray) {
-          // Dragged off canvas → unstage
-          await this._persistMapPosition(id, null, null);
-        }
+      const d = dragging; dragging = null;
+      detachDoc();
+      if (d.tile) d.tile.style.opacity = "";
+      if (ghost) { ghost.remove(); ghost = null; this[ghostKey] = null; }
+      if (!this[movedKey] || !canvas) return;
+      const r = canvas.getBoundingClientRect();
+      const over = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      if (over) {
+        // Clamp so the tile (drawn centered on the loc point) stays fully inside.
+        const halfX = (d.width / 2 / r.width) * 100;
+        const halfY = (d.width / 2 / r.height) * 100;
+        const loc_x = Math.max(halfX, Math.min(100 - halfX, ((e.clientX - r.left) / r.width) * 100));
+        const loc_y = Math.max(halfY, Math.min(100 - halfY, ((e.clientY - r.top) / r.height) * 100));
+        await onCommit({ id: d.id, locX: loc_x, locY: loc_y });
+      } else if (!d.fromTray) {
+        await onCommit({ id: d.id, locX: null, locY: null });
       }
-      dragging = null;
     };
 
-    if (canvas) {
-      canvas.addEventListener("pointerdown", onDown);
-      canvas.addEventListener("pointermove", onMove);
-      canvas.addEventListener("pointerup", onUp);
-      canvas.addEventListener("pointercancel", onUp);
-    }
-    if (tray) {
-      tray.addEventListener("pointerdown", onDown);
-      tray.addEventListener("pointermove", onMove);
-      tray.addEventListener("pointerup", onUp);
-      tray.addEventListener("pointercancel", onUp);
-    }
+    [canvas, tray].filter(Boolean).forEach((el) => el.addEventListener("pointerdown", onDown));
   }
 
   async _persistMapPosition(id, locX, locY) {
@@ -1541,7 +1557,30 @@ class StockpileCard extends HTMLElement {
       await this._fetch();
     } catch (e) {
       console.error("stockpile: map position failed", e);
+      this._showToast(locX == null ? "Couldn't unstage — retry?" : "Couldn't save position — retry?", "error");
     }
+  }
+
+  _showToast(message, kind = "info") {
+    let host = this.shadowRoot.querySelector(".sp-toast-host");
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "sp-toast-host";
+      this.shadowRoot.appendChild(host);
+    }
+    const el = document.createElement("div");
+    el.className = `sp-toast sp-toast-${kind}`;
+    el.textContent = message;
+    host.appendChild(el);
+    // Force reflow so the enter animation triggers
+    void el.offsetWidth;
+    el.classList.add("show");
+    const close = () => {
+      el.classList.remove("show");
+      setTimeout(() => el.remove(), 220);
+    };
+    el.addEventListener("click", close);
+    setTimeout(close, 3200);
   }
 
   _renderTemplateSetup(loc) {
@@ -1843,58 +1882,10 @@ class StockpileCard extends HTMLElement {
   }
 
   _wireFloorPlanDrag(canvas, tray) {
-    let dragging = null;
-    let ghost = null;
-    this._fpDragMoved = false;
-    const THRESH = 6;
-
-    const startDrag = (tile, e) => {
-      e.preventDefault();
-      this._fpDragMoved = false;
-      const box = tile.getBoundingClientRect();
-      dragging = { id: tile.dataset.id, fromTray: tile.classList.contains("staged"), startX: e.clientX, startY: e.clientY, tile };
-      ghost = tile.cloneNode(true);
-      ghost.classList.add("map-ghost");
-      ghost.style.cssText = `position:fixed;width:${box.width}px;left:${box.left}px;top:${box.top}px;`;
-      this._fpGhost = ghost;
-      this.shadowRoot.appendChild(ghost);
-      tile.style.opacity = "0.25";
-      tile.setPointerCapture && tile.setPointerCapture(e.pointerId);
-    };
-
-    const onDown = (e) => { const t = e.target.closest(".map-tile"); if (t) startDrag(t, e); };
-
-    const onMove = (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - dragging.startX, dy = e.clientY - dragging.startY;
-      if (!this._fpDragMoved && Math.hypot(dx, dy) < THRESH) return;
-      this._fpDragMoved = true;
-      if (ghost) { ghost.style.left = (parseFloat(ghost.style.left) + e.movementX) + "px"; ghost.style.top = (parseFloat(ghost.style.top) + e.movementY) + "px"; }
-    };
-
-    const onUp = async (e) => {
-      if (!dragging) return;
-      if (dragging.tile) dragging.tile.style.opacity = "";
-      if (ghost) { ghost.remove(); ghost = null; this._fpGhost = null; }
-      if (this._fpDragMoved && canvas) {
-        const r = canvas.getBoundingClientRect();
-        const over = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-        if (over) {
-          const loc_x = Math.max(2, Math.min(98, ((e.clientX - r.left) / r.width) * 100));
-          const loc_y = Math.max(2, Math.min(98, ((e.clientY - r.top) / r.height) * 100));
-          await this._persistMapPosition(dragging.id, loc_x, loc_y);
-        } else if (!dragging.fromTray) {
-          await this._persistMapPosition(dragging.id, null, null);
-        }
-      }
-      dragging = null;
-    };
-
-    [canvas, tray].filter(Boolean).forEach((el) => {
-      el.addEventListener("pointerdown", onDown);
-      el.addEventListener("pointermove", onMove);
-      el.addEventListener("pointerup", onUp);
-      el.addEventListener("pointercancel", onUp);
+    this._wirePointerXYDrag(canvas, tray, {
+      ghostKey: "_fpGhost",
+      movedKey: "_fpDragMoved",
+      onCommit: ({ id, locX, locY }) => this._persistMapPosition(id, locX, locY),
     });
   }
 
@@ -2751,6 +2742,36 @@ class StockpileCard extends HTMLElement {
       @keyframes sp-fade { from { opacity: 0 } to { opacity: 1 } }
       @keyframes sp-pop  { from { transform: translateY(8px) scale(.98); opacity: 0 } to { transform: none; opacity: 1 } }
 
+      /* Toasts */
+      .sp-toast-host {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 10000;
+        pointer-events: none;
+      }
+      .sp-toast {
+        pointer-events: auto;
+        background: var(--sp-surface-2, #2a2a2a);
+        color: var(--sp-fg, #fff);
+        padding: 10px 14px;
+        border-radius: 10px;
+        box-shadow: var(--sp-elevation-strong, 0 8px 24px rgba(0,0,0,.35));
+        font-size: .88rem;
+        opacity: 0;
+        transform: translateY(10px);
+        transition: opacity .2s ease, transform .2s ease;
+        max-width: min(92vw, 360px);
+        cursor: pointer;
+      }
+      .sp-toast.show { opacity: 1; transform: none; }
+      .sp-toast-error { border-left: 3px solid #e25c4d; }
+      .sp-toast-info  { border-left: 3px solid var(--sp-primary, #4a8df0); }
+
       /* Trends view */
       .tr-head {
         display: grid;
@@ -2823,6 +2844,7 @@ class StockpileCard extends HTMLElement {
         border-radius: var(--sp-radius-md);
         border: 1px solid var(--sp-divider);
         background: var(--sp-surface);
+        touch-action: none;
       }
       .map-bg {
         position: absolute;
@@ -2845,6 +2867,9 @@ class StockpileCard extends HTMLElement {
         transition: transform .12s ease, box-shadow .12s ease;
         z-index: 2;
         user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+        -webkit-touch-callout: none;
       }
       .map-tile:hover { transform: translate(-50%,-50%) scale(1.08); box-shadow: var(--sp-elevation-strong); }
       .map-tile:focus-visible { outline: 2px solid var(--sp-primary); outline-offset: 2px; }
@@ -3610,6 +3635,7 @@ class StockpileCard extends HTMLElement {
         border: 1px solid var(--sp-divider);
         background: var(--sp-surface);
         flex-shrink: 0;
+        touch-action: none;
       }
 
       .fp-tile {

@@ -16,3 +16,7 @@ PLATFORMS = ["sensor"]
 
 # A package is considered "depleted" at this remaining percent.
 DEPLETED_AT = 0.0
+
+# How many days of consumption_log history to keep before pruning at startup.
+# Velocity windows are at most 30 days, so 365 leaves a wide safety margin.
+CONSUMPTION_LOG_RETENTION_DAYS = 365

@@ -10,13 +10,14 @@ import asyncio
 import json
 import uuid
 from datetime import timedelta as _timedelta
+from math import ceil
 from typing import Any
 
 import aiosqlite
 
 from homeassistant.util import dt as dt_util
 
-from .const import EXPIRING_SOON_DAYS
+from .const import CONSUMPTION_LOG_RETENTION_DAYS, EXPIRING_SOON_DAYS
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS locations (
@@ -88,6 +89,21 @@ def _now() -> str:
     return dt_util.utcnow().isoformat()
 
 
+def _parse_aliases(raw: Any) -> list[str]:
+    """Tolerant JSON parse for the products.aliases column.
+
+    Corrupted or unexpected payloads degrade to [] rather than killing the
+    whole product list.
+    """
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return val if isinstance(val, list) else []
+
+
 class InventoryDB:
     """Owns the SQLite connection and all data operations."""
 
@@ -107,6 +123,18 @@ class InventoryDB:
         await self._db.executescript(SCHEMA)
         await self._db.commit()
         await self._migrate()
+        await self._prune_consumption_log()
+
+    async def _prune_consumption_log(self) -> None:
+        """Trim consumption_log entries older than the retention window.
+
+        Velocity calcs only look back 30 days; keeping a year of history is
+        enough for trend views without letting the table grow unbounded.
+        """
+        assert self._db is not None
+        cutoff = (dt_util.utcnow() - _timedelta(days=CONSUMPTION_LOG_RETENTION_DAYS)).isoformat()
+        await self._db.execute("DELETE FROM consumption_log WHERE ts < ?", (cutoff,))
+        await self._db.commit()
 
     async def _migrate(self) -> None:
         """Lightweight column migrations for DBs created by older versions.
@@ -213,13 +241,13 @@ class InventoryDB:
     async def get_products(self) -> list[dict[str, Any]]:
         rows = await self._query("SELECT * FROM products ORDER BY name")
         for r in rows:
-            r["aliases"] = json.loads(r["aliases"] or "[]")
+            r["aliases"] = _parse_aliases(r["aliases"])
         return rows
 
     async def get_product(self, product_id: str) -> dict[str, Any] | None:
         row = await self._query_one("SELECT * FROM products WHERE id = ?", (product_id,))
         if row:
-            row["aliases"] = json.loads(row["aliases"] or "[]")
+            row["aliases"] = _parse_aliases(row["aliases"])
         return row
 
     async def find_product(self, name: str, brand: str | None = None) -> dict[str, Any] | None:
@@ -253,7 +281,7 @@ class InventoryDB:
                     return candidate
             return None
 
-        row["aliases"] = json.loads(row["aliases"] or "[]")
+        row["aliases"] = _parse_aliases(row["aliases"])
         return row
 
     async def remove_product(self, product_id: str) -> None:
@@ -591,9 +619,10 @@ class InventoryDB:
             vel = velocities.get(pid)
             per_day = vel["per_day"] if vel else 0.0
 
-            # Days until empty, capped to avoid huge numbers
+            # Days until empty. Ceil so <1 day of stock reports 1 (distinct
+            # from "out") and won't fall through the horizon check by rounding to 0.
             if per_day > 0:
-                days_left: int | None = int(equiv / per_day)
+                days_left: int | None = 0 if equiv <= 0 else ceil(equiv / per_day)
             else:
                 days_left = None
 

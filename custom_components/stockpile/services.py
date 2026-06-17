@@ -118,7 +118,7 @@ ADD_PRODUCT_SCHEMA = vol.Schema(
         vol.Optional("category"): cv.string,
         vol.Optional("image"): cv.string,
         vol.Optional("aliases"): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional("threshold"): vol.Coerce(float),
+        vol.Optional("threshold"): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 
@@ -134,7 +134,7 @@ ADD_PACKAGE_SCHEMA = vol.Schema(
         vol.Optional("image"): cv.string,
         vol.Optional("category"): cv.string,
         vol.Optional("remaining", default=100.0): vol.All(vol.Coerce(float), vol.Range(0, 100)),
-        vol.Optional("quantity", default=1.0): vol.Coerce(float),
+        vol.Optional("quantity", default=1.0): vol.All(vol.Coerce(float), vol.Range(min=0)),
         vol.Optional("location_id"): cv.string,
         vol.Optional("frozen"): cv.string,
         vol.Optional("expires"): cv.string,
@@ -197,8 +197,8 @@ PARSE_RECEIPT_SCHEMA = vol.Schema({vol.Required("text"): cv.string})
 SET_PACKAGE_POSITION_SCHEMA = vol.Schema(
     {
         vol.Required("package_id"): cv.string,
-        vol.Optional("loc_x"): vol.Any(None, vol.Coerce(float)),
-        vol.Optional("loc_y"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("loc_x"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100))),
+        vol.Optional("loc_y"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100))),
     }
 )
 SET_LOCATION_TEMPLATE_SCHEMA = vol.Schema(
