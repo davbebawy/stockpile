@@ -1491,9 +1491,8 @@ class StockpileCard extends HTMLElement {
         fromTray: t.classList.contains("staged"),
         startX: e.clientX,
         startY: e.clientY,
-        offsetX: e.clientX - box.left,
-        offsetY: e.clientY - box.top,
         width: box.width,
+        height: box.height,
         tile: t,
       };
       try { t.setPointerCapture && t.setPointerCapture(e.pointerId); } catch (_) {}
@@ -1509,13 +1508,19 @@ class StockpileCard extends HTMLElement {
         this[movedKey] = true;
         ghost = dragging.tile.cloneNode(true);
         ghost.classList.add("map-ghost");
-        ghost.style.cssText = `position:fixed;width:${dragging.width}px;left:${e.clientX - dragging.offsetX}px;top:${e.clientY - dragging.offsetY}px;`;
+        // Center the ghost on the cursor. The dropped tile renders centered on
+        // its loc point (via translate(-50%,-50%) on .map-tile), so centering
+        // the ghost here means the ghost is exactly where the tile will land —
+        // WYSIWYG, regardless of where on the tile the user grabbed.
+        // The explicit transform overrides the inherited .map-tile transform
+        // (without this the ghost renders shifted up-left by half its size).
+        ghost.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;transform:translate(-50%,-50%) !important;margin:0;`;
         this[ghostKey] = ghost;
         this.shadowRoot.appendChild(ghost);
         dragging.tile.style.opacity = "0.25";
       }
-      ghost.style.left = (e.clientX - dragging.offsetX) + "px";
-      ghost.style.top = (e.clientY - dragging.offsetY) + "px";
+      ghost.style.left = e.clientX + "px";
+      ghost.style.top = e.clientY + "px";
     };
 
     const onUp = async (e) => {
@@ -1530,7 +1535,7 @@ class StockpileCard extends HTMLElement {
       if (over) {
         // Clamp so the tile (drawn centered on the loc point) stays fully inside.
         const halfX = (d.width / 2 / r.width) * 100;
-        const halfY = (d.width / 2 / r.height) * 100;
+        const halfY = (d.height / 2 / r.height) * 100;
         const loc_x = Math.max(halfX, Math.min(100 - halfX, ((e.clientX - r.left) / r.width) * 100));
         const loc_y = Math.max(halfY, Math.min(100 - halfY, ((e.clientY - r.top) / r.height) * 100));
         await onCommit({ id: d.id, locX: loc_x, locY: loc_y });
