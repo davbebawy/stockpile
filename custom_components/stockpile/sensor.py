@@ -11,9 +11,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from .const import DOMAIN, EVENT_UPDATED, VERSION
 from .db import InventoryDB
+
+# Debounce window for EVENT_UPDATED bursts. Bulk imports or receipt adds can
+# fire dozens of events back-to-back; collapsing them avoids a refresh storm.
+_REFRESH_DEBOUNCE_S = 0.1
 
 
 def _device_info(entry: ConfigEntry) -> DeviceInfo:
@@ -53,15 +58,32 @@ class _BaseInventorySensor(SensorEntity):
         self._attr_device_info = _device_info(entry)
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
+        self._cancel_pending = None
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
             self.hass.bus.async_listen(EVENT_UPDATED, self._handle_update)
         )
+        self.async_on_remove(self._cancel_pending_refresh)
         await self._refresh()
 
     @callback
+    def _cancel_pending_refresh(self) -> None:
+        if self._cancel_pending is not None:
+            self._cancel_pending()
+            self._cancel_pending = None
+
+    @callback
     def _handle_update(self, _event) -> None:
+        # Collapse bursts of EVENT_UPDATED into a single refresh.
+        self._cancel_pending_refresh()
+        self._cancel_pending = async_call_later(
+            self.hass, _REFRESH_DEBOUNCE_S, self._scheduled_refresh
+        )
+
+    @callback
+    def _scheduled_refresh(self, _now) -> None:
+        self._cancel_pending = None
         self.hass.async_create_task(self._refresh())
 
     async def _refresh(self) -> None:

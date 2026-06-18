@@ -8,7 +8,7 @@ from .const import DB_FILENAME, DOMAIN, PLATFORMS
 from .db import InventoryDB
 from .frontend_register import async_register_frontend
 from .http_views import StockpileQRView
-from .services import async_register_services
+from .services import async_register_services, async_unregister_services
 from .websocket import async_register_websocket
 
 # Typed config entry (2024.6+): the DB lives on entry.runtime_data.
@@ -42,4 +42,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: StockpileConfigEntry) -
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok and entry.runtime_data is not None:
         await entry.runtime_data.async_close()
+    # Single-instance integration: when the last entry unloads, drop the
+    # process-wide service registrations so a fresh install starts clean.
+    if unload_ok and not hass.config_entries.async_entries(DOMAIN):
+        async_unregister_services(hass)
+        hass.data.setdefault(DOMAIN, {}).pop("_registered", None)
     return unload_ok

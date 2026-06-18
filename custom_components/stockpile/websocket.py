@@ -7,6 +7,7 @@ every time EVENT_UPDATED fires so the card refreshes live.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from urllib.parse import quote_plus
 
@@ -17,6 +18,8 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import EVENT_UPDATED
 from .helpers import get_db as _db
+
+_LOGGER = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Open Food Facts helpers
@@ -286,7 +289,8 @@ async def ws_search_product(hass, connection, msg):
         connection.send_result(msg["id"], {"results": results, "cached": False})
 
     except Exception as exc:  # noqa: BLE001
-        connection.send_error(msg["id"], "off_fetch_error", str(exc))
+        _LOGGER.warning("Open Food Facts lookup failed for %r: %s", query or barcode, exc)
+        connection.send_error(msg["id"], "off_fetch_error", "Product lookup failed")
 
 
 @websocket_api.websocket_command({vol.Required("type"): "stockpile/off_cache"})

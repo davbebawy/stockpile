@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import io
+import logging
 from urllib.parse import urlparse
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class StockpileQRView(HomeAssistantView):
@@ -56,4 +59,5 @@ class StockpileQRView(HomeAssistantView):
                 text="qrcode library not installed — restart Home Assistant after setup",
             )
         except Exception as exc:  # noqa: BLE001
-            return web.Response(status=500, text=str(exc))
+            _LOGGER.warning("QR generation failed for %r: %s", target_url, exc)
+            return web.Response(status=500, text="QR generation failed")

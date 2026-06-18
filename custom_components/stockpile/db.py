@@ -271,15 +271,36 @@ class InventoryDB:
             )
 
         if not row:
-            # Fall back to alias search. SQLite JSON1 is widely available,
-            # but be defensive — load all products and scan their alias lists.
-            for candidate in await self.get_products():
-                if brand and (candidate.get("brand") or "").strip().lower() != brand.strip().lower():
-                    continue
-                aliases = [a.strip().lower() for a in (candidate.get("aliases") or [])]
-                if needle in aliases:
-                    return candidate
-            return None
+            # Alias fallback. Prefer JSON1's json_each (one query). Fall back to
+            # a Python scan if the SQLite build lacks the JSON1 extension —
+            # rare on modern systems but worth not crashing over.
+            try:
+                if brand:
+                    alias_rows = await self._query(
+                        """SELECT p.* FROM products p, json_each(p.aliases)
+                           WHERE lower(trim(json_each.value)) = ?
+                             AND lower(coalesce(p.brand,'')) = lower(?)""",
+                        (needle, brand),
+                    )
+                else:
+                    alias_rows = await self._query(
+                        """SELECT p.* FROM products p, json_each(p.aliases)
+                           WHERE lower(trim(json_each.value)) = ?""",
+                        (needle,),
+                    )
+                if alias_rows:
+                    hit = alias_rows[0]
+                    hit["aliases"] = _parse_aliases(hit["aliases"])
+                    return hit
+                return None
+            except Exception:
+                for candidate in await self.get_products():
+                    if brand and (candidate.get("brand") or "").strip().lower() != brand.strip().lower():
+                        continue
+                    aliases = [a.strip().lower() for a in (candidate.get("aliases") or [])]
+                    if needle in aliases:
+                        return candidate
+                return None
 
         row["aliases"] = _parse_aliases(row["aliases"])
         return row
@@ -399,6 +420,14 @@ class InventoryDB:
         # calls from both reading the same remaining and clobbering each other.
         async with self._write_lock:
             assert self._db is not None
+            async with self._db.execute(
+                "SELECT remaining FROM packages WHERE id = ?", (package_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                # Package was deleted between the initial fetch and the lock —
+                # don't log a phantom event against a vanished package.
+                return None
             await self._db.execute(
                 "UPDATE packages SET remaining = MAX(0.0, MIN(100.0, remaining - ?)) WHERE id = ?",
                 (amount, package_id),
@@ -407,7 +436,7 @@ class InventoryDB:
                 "SELECT remaining FROM packages WHERE id = ?", (package_id,)
             ) as cur:
                 row = await cur.fetchone()
-            new_remaining = float(row[0]) if row else 0.0
+            new_remaining = float(row[0])
             await self._db.commit()
         await self._log(package_id, pkg["product_id"], amount, new_remaining, who)
         return await self.get_package(package_id)
@@ -839,8 +868,11 @@ class InventoryDB:
                 await self._db.execute("RELEASE sp_import")
                 await self._db.commit()
             except Exception:
+                # Undo everything since the savepoint, release it, then close
+                # the implicit outer transaction so the next call starts clean.
                 await self._db.execute("ROLLBACK TO sp_import")
                 await self._db.execute("RELEASE sp_import")
+                await self._db.rollback()
                 raise
             return counts
 

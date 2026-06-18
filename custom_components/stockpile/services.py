@@ -7,10 +7,17 @@ and the frontend card can react. Service calls that need to return data
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import timedelta
 
 import voluptuous as vol
+
+_LOGGER = logging.getLogger(__name__)
+
+# Soft cap on import payload size — refuses obvious garbage / oversized blobs
+# before they take the write lock for minutes.
+_IMPORT_MAX_ROWS = 100_000
 
 from homeassistant.core import (
     HomeAssistant,
@@ -39,6 +46,9 @@ _SKIP_WORDS = frozenset([
     'manager', 'special', 'sale', 'tel', 'phone', 'fax', 'address', 'www',
     'http', 'member', 'loyalty', 'reward', 'points',
 ])
+# Single compiled alternation so each receipt line costs one regex op,
+# not len(_SKIP_WORDS) ops.
+_SKIP_RE = re.compile(r'\b(?:' + '|'.join(re.escape(w) for w in _SKIP_WORDS) + r')\b')
 _UNIT_NORM = {'lbs': 'lb', 'ozs': 'oz', 'kgs': 'kg', 'packs': 'pack', 'pks': 'pack'}
 
 
@@ -51,7 +61,7 @@ def _parse_receipt_text(text: str) -> list[dict]:
         if len(line) < 3:
             continue
         ll = line.lower()
-        if any(re.search(r'\b' + re.escape(w) + r'\b', ll) for w in _SKIP_WORDS):
+        if _SKIP_RE.search(ll):
             continue
         line = _PRICE_RE.sub('', line).strip()
         if not line:
@@ -238,7 +248,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         user_id = getattr(call.context, "user_id", None)
         if not user_id:
             return None
-        user = await hass.auth.async_get_user(user_id)
+        try:
+            user = await hass.auth.async_get_user(user_id)
+        except Exception:  # noqa: BLE001
+            # A flaky auth lookup shouldn't take down a consume call —
+            # log the user as anonymous and continue.
+            _LOGGER.debug("Could not resolve user %s for service call", user_id)
+            return None
         return user.name if user else None
 
     async def add_product(call: ServiceCall) -> ServiceResponse:
@@ -344,7 +360,16 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def import_data(call: ServiceCall) -> ServiceResponse:
         db = get_db(hass)
-        counts = await db.import_all(call.data["data"], replace=call.data["replace"])
+        data = call.data["data"]
+        total = sum(
+            len(data.get(k, []) or [])
+            for k in ("locations", "products", "packages", "consumption_log", "product_state")
+        )
+        if total > _IMPORT_MAX_ROWS:
+            raise vol.Invalid(
+                f"import payload too large: {total} rows (limit {_IMPORT_MAX_ROWS})"
+            )
+        counts = await db.import_all(data, replace=call.data["replace"])
         notify()
         return {"imported": counts}
 
@@ -375,14 +400,20 @@ def async_register_services(hass: HomeAssistant) -> None:
         dedupe = call.data["dedupe"]
 
         items: list[str] = []
+        seen_low_products: set[str] = set()
         if kind in ("all", "low"):
             for r in await db.get_low_stock():
                 label = r["name"]
                 if r.get("brand"):
                     label = f"{label} ({r['brand']})"
                 items.append(label)
+                seen_low_products.add(r["product_id"])
         if kind in ("all", "expiring"):
             for r in await db.get_expiring_soon():
+                # When kind=all, a product that's both low AND expiring would
+                # otherwise produce two todo items. Keep the "low" one and skip.
+                if r["product_id"] in seen_low_products:
+                    continue
                 label = r["product_name"]
                 if r.get("brand"):
                     label = f"{label} ({r['brand']})"
@@ -420,14 +451,19 @@ def async_register_services(hass: HomeAssistant) -> None:
         low = await db.get_low_stock() if kind in ("all", "low") else []
         expiring = await db.get_expiring_soon() if kind in ("all", "expiring") else []
         low_lines = []
+        low_product_ids: set[str] = set()
         for r in low[:limit]:
             brand = f" ({r['brand']})" if r.get("brand") else ""
             low_lines.append(
                 f"{r['name']}{brand}"
                 f" — {r['package_count']} pkg, {round(r['equiv_remaining'], 2)} left"
             )
+            low_product_ids.add(r["product_id"])
         exp_lines = []
-        for r in expiring[:limit]:
+        # Skip products that already appear in the "low stock" block so a
+        # product that's both low and expiring doesn't show up twice.
+        deduped_expiring = [r for r in expiring if r["product_id"] not in low_product_ids]
+        for r in deduped_expiring[:limit]:
             brand = f" ({r['brand']})" if r.get("brand") else ""
             days = r["expires_in_days"]
             exp_str = f"expired {abs(days)}d ago" if r["expired"] else f"expires in {days}d"
