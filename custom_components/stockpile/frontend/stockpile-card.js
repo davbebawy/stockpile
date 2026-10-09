@@ -4048,12 +4048,39 @@ class StockpileMapCardEditor extends StockpileCardEditorBase {
   }
 }
 
-customElements.define("stockpile-card", StockpileCard);
-customElements.define("stockpile-summary-card", StockpileSummaryCard);
-customElements.define("stockpile-map-card", StockpileMapCard);
-customElements.define("stockpile-card-editor", StockpileCardEditor);
-customElements.define("stockpile-summary-card-editor", StockpileSummaryCardEditor);
-customElements.define("stockpile-map-card-editor", StockpileMapCardEditor);
+const STOCKPILE_ELEMENTS = [
+  ["stockpile-card", StockpileCard],
+  ["stockpile-summary-card", StockpileSummaryCard],
+  ["stockpile-map-card", StockpileMapCard],
+  ["stockpile-card-editor", StockpileCardEditor],
+  ["stockpile-summary-card-editor", StockpileSummaryCardEditor],
+  ["stockpile-map-card-editor", StockpileMapCardEditor],
+];
+
+const defineElements = () => {
+  for (const [tag, cls] of STOCKPILE_ELEMENTS) {
+    if (customElements.get(tag)) continue;
+    try {
+      customElements.define(tag, cls);
+    } catch (e) {
+      // Registry not ready; the next pass tries again.
+    }
+  }
+};
+
+// Home Assistant imports this file (add_extra_js_url) before its app.js, and
+// app.js installs a scoped custom element registry polyfill
+// (home-assistant/frontend#52960). Elements defined before that are invisible
+// to the polyfill, so dashboards show "Configuration error". Define now, then
+// again once <home-assistant> is defined and every 250 ms for 10 s, so the
+// polyfill sees them whichever way the race goes.
+defineElements();
+customElements.whenDefined("home-assistant").then(defineElements);
+let stockpileDefineChecks = 0;
+const stockpileDefineTimer = setInterval(() => {
+  defineElements();
+  if (++stockpileDefineChecks >= 40) clearInterval(stockpileDefineTimer);
+}, 250);
 
 window.customCards = window.customCards || [];
 window.customCards.push(
